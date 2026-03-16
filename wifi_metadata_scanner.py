@@ -17,6 +17,7 @@ import json
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -53,14 +54,62 @@ def parse_netsh_output(raw_text: str) -> dict[str, Any]:
     """Parse netsh wlan output into structured data."""
     networks: list[dict[str, Any]] = []
 
+    def normalize_label(label: str) -> str:
+        # Make label matching resilient to locale/diacritics and minor spacing differences.
+        collapsed = " ".join(label.strip().split()).lower()
+        ascii_label = (
+            unicodedata.normalize("NFKD", collapsed)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+        return ascii_label
+
+    ssid_level_keys = {
+        "authentication": "authentication",
+        "authentifizierung": "authentication",
+        "encryption": "encryption",
+        "verschlusselung": "encryption",
+    }
+
+    bssid_level_keys = {
+        "signal": "signal",
+        "radio type": "radio_type",
+        "funktyp": "radio_type",
+        "band": "band",
+        "channel": "channel",
+        "kanal": "channel",
+    }
+
     current_ssid: dict[str, Any] | None = None
     current_bssid: dict[str, Any] | None = None
 
     # Matches lines like: "SSID 1 : MyNetwork"
     ssid_re = re.compile(r"^\s*SSID\s+\d+\s*:\s*(.*)$", re.IGNORECASE)
 
-    for raw_line in raw_text.splitlines():
-        line = raw_line.rstrip()
+    raw_lines = [line.rstrip() for line in raw_text.splitlines()]
+    unwrapped_lines: list[str] = []
+    idx = 0
+    while idx < len(raw_lines):
+        line = raw_lines[idx]
+        stripped = line.strip()
+
+        # netsh sometimes hard-wraps "SSID"/"BSSID" when captured from subprocess.
+        if stripped.upper() in {"SSI", "BSSI"} and idx + 1 < len(raw_lines):
+            line = f"{line}{raw_lines[idx + 1].lstrip()}"
+            idx += 1
+            stripped = line.strip()
+
+        # It can also wrap right before the colon in "key : value" lines.
+        if ":" not in stripped and idx + 1 < len(raw_lines):
+            next_stripped = raw_lines[idx + 1].strip()
+            if next_stripped.startswith(":"):
+                line = f"{line}{next_stripped}"
+                idx += 1
+
+        unwrapped_lines.append(line)
+        idx += 1
+
+    for line in unwrapped_lines:
         if not line:
             continue
 
@@ -81,14 +130,6 @@ def parse_netsh_output(raw_text: str) -> dict[str, Any]:
 
         stripped = line.strip()
 
-        if stripped.lower().startswith("authentication") and ":" in stripped:
-            current_ssid["authentication"] = stripped.split(":", 1)[1].strip()
-            continue
-
-        if stripped.lower().startswith("encryption") and ":" in stripped:
-            current_ssid["encryption"] = stripped.split(":", 1)[1].strip()
-            continue
-
         if stripped.lower().startswith("bssid") and ":" in stripped:
             bssid_value = stripped.split(":", 1)[1].strip()
             current_bssid = {
@@ -101,28 +142,38 @@ def parse_netsh_output(raw_text: str) -> dict[str, Any]:
             current_ssid["bssids"].append(current_bssid)
             continue
 
+        if ":" in stripped:
+            raw_key, raw_value = stripped.split(":", 1)
+            label = normalize_label(raw_key)
+            value = raw_value.strip()
+
+            if label in ssid_level_keys:
+                current_ssid[ssid_level_keys[label]] = value
+                continue
+
         if current_bssid is None:
             continue
 
-        if stripped.lower().startswith("signal") and ":" in stripped:
-            current_bssid["signal"] = stripped.split(":", 1)[1].strip()
+        if ":" not in stripped:
             continue
 
-        if stripped.lower().startswith("radio type") and ":" in stripped:
-            current_bssid["radio_type"] = stripped.split(":", 1)[1].strip()
+        raw_key, raw_value = stripped.split(":", 1)
+        label = normalize_label(raw_key)
+        value = raw_value.strip()
+
+        if label not in bssid_level_keys:
             continue
 
-        if stripped.lower().startswith("band") and ":" in stripped:
-            current_bssid["band"] = stripped.split(":", 1)[1].strip()
-            continue
-
-        if stripped.lower().startswith("channel") and ":" in stripped:
-            channel_text = stripped.split(":", 1)[1].strip()
+        mapped_key = bssid_level_keys[label]
+        if mapped_key == "channel":
             try:
-                current_bssid["channel"] = int(channel_text)
+                current_bssid[mapped_key] = int(value)
             except ValueError:
-                current_bssid["channel"] = channel_text
+                current_bssid[mapped_key] = value
             continue
+
+        current_bssid[mapped_key] = value
+        continue
 
     payload = {
         "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),

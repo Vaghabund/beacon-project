@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+wifi_scan.json
+wifi_scan.csv
