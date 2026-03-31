@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "generated_by": "GitHub Copilot",
+    "repo": "Vaghabund/beacon-project",
+    "date": "2026-03-30T12:00:00Z",
+    "version": "1.0.0",
+    "description": "Single Wi‑Fi scan snapshot — one-time read data for parser/unit tests"
+  },
+  "scanner": {
+    "id": "scanner_01",
+    "hostname": "scan-node-01",
+    "model": "RaspberryPi-4b",
+    "mac": "de:ad:be:ef:00:01",
+    "os": "raspbian",
+    "driver": "nl80211",
+    "antenna_count": 2,
+    "location": {
+      "lat": 52.520008,
+      "lng": 13.404954,
+      "alt_m": 34.5,
+      "description": "Main Lobby, near entrance"
+    }
+  },
+  "scan_session": {
+    "id": "scan_20260330_120000",
+    "timestamp": "2026-03-30T12:00:00Z",
+    "type": "active",
+    "dwell_ms_per_channel": 120,
+    "channels_scanned": [1, 6, 11, 36, 40, 44, 149],
+    "noise_floor_dbm": -96,
+    "scan_frames_captured": 196
+  },
+  "networks": [
+    {
+      "bssid": "de:ad:be:ef:10:01",
+      "ssid": "MeshNet",
+      "is_hidden": false,
+      "vendor_oui": "DE:AD:BE",
+      "frequency_mhz": 2412,
+      "channel": 1,
+      "channel_width_mhz": 20,
+      "rssi_dbm": -30,
+      "tx_power_dbm": 22,
+      "beacon_interval_ms": 100,
+      "security": "WPA2-Enterprise (802.1X)",
+      "capabilities": ["HT", "Mesh"],
+      "last_seen": "2026-03-30T12:00:00Z",
+      "age_ms": 0,
+      "supported_rates_mbps": [6, 12, 24, 54],
+      "raw_ies_hex": "00124d6573684e6574...",
+      "samples": [
+        { "timestamp": "2026-03-30T12:00:00Z", "rssi_dbm": -30 }
+      ]
+    }
+  ],
+  "summary": {
+    "total_aps": 1,
+    "unique_ssids": 1,
+    "open_aps": 0,
+    "wpa2_aps": 0,
+    "wpa3_aps": 0,
+    "enterprise_aps": 0,
+    "strongest_rssi_dbm": -30,
+    "weakest_rssi_dbm": -30,
+    "channel_histogram": {
+      "1": 1,
+      "6": 0,
+      "36": 0,
+      "149": 0
+    },
+    "vendor_oui_counts": {
+      "DE:AD:BE": 1
+    }
+  }
+}
