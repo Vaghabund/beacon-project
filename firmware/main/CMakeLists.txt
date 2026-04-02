@@ -1,0 +1,23 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "wifi_scan.c"
+        "camera.c"
+        "image_gen.c"
+        "display.c"
+        "sd_save.c"
+        "battery.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_lcd
+        driver
+        fatfs
+        sdmmc
+        mbedtls
+        esp_timer
+        log
+)

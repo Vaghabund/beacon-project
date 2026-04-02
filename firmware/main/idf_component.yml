@@ -1,0 +1,7 @@
+# Beacon Project – ESP-IDF component dependencies
+# Add esp32-camera via IDF Component Manager
+dependencies:
+  espressif/esp32-camera:
+    version: ">=2.0.3"
+  idf:
+    version: ">=5.0.0"
