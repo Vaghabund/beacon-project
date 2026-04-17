@@ -140,21 +140,21 @@ Arduino version:  ≥ 3.x (ESP32 core)
 | TFT_eSPI | latest | configure User_Setup.h for your panel |
 | esp32-camera | bundled with arduino-esp32 core | no install needed |
 
-## TFT_eSPI User_Setup.h (ST7789 320×240 landscape example)
+## TFT_eSPI User_Setup.h
 
-```cpp
-#define ST7789_DRIVER
-#define TFT_WIDTH  320
-#define TFT_HEIGHT 240
-#define TFT_MOSI   11    // adjust to your wiring
-#define TFT_SCLK   12
-#define TFT_CS     10
-#define TFT_DC      9
-#define TFT_RST     8
-#define TFT_MISO   -1
-#define SPI_FREQUENCY       40000000
-#define SPI_READ_FREQUENCY  20000000
+A ready-to-use `User_Setup.h` is included in this repo. Copy it into the library:
+
 ```
+cp User_Setup.h ~/Arduino/libraries/TFT_eSPI/User_Setup.h
+```
+
+Key settings it sets:
+- `ST7789_DRIVER`, `TFT_WIDTH 320`, `TFT_HEIGHT 240`
+- `SPI_FREQUENCY 80000000` — 80MHz, halves blit time vs 40MHz
+- `ESP32_DMA` — required for ping-pong DMA blit
+- Only GLCD font loaded — smaller binary
+
+Adjust the pin defines at the top to match your wiring.
 
 ## GPIO pins to avoid on ESP32-S3R8
 
@@ -167,7 +167,7 @@ Do not assign any peripheral or camera pin to these.
 
 | step | estimate |
 |------|----------|
-| Live view frame rate | ~5–8 fps (JPEG decode + SPI blit limited) |
+| Live view frame rate | ~25–30 fps (GRAB_LATEST + quality 63 + 80MHz SPI) |
 | Capture settle | 100ms |
 | Camera capture (JPEG QVGA) | ~50ms |
 | fmt2rgb888 decode | ~10ms |
@@ -198,6 +198,7 @@ disp_mode       = 0    // 0=radial (fastest, LUT-only)
 wifi_rings.h                    types, RingConfig, API
 wifi_rings.c                    encode algorithm, pure C, no Arduino deps
 wifi_rings_esp32s3.ino          full Arduino sketch
+User_Setup.h                    TFT_eSPI config — copy to Arduino/libraries/TFT_eSPI/
 wifi_rings_per_signal.html      browser reference — visualise the algorithm
 mock_wifi_networks.json         mock scan data for the browser reference
 README.md                       this file
