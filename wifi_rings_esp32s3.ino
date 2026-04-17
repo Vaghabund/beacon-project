@@ -209,10 +209,11 @@ static bool camera_init() {
     // JPEG capture — not RGB direct (avoids PSRAM bandwidth corruption with WiFi)
     cfg.pixel_format = PIXFORMAT_JPEG;
     cfg.frame_size   = FRAMESIZE_QVGA;  // 320×240 matches display
-    cfg.jpeg_quality = 12;              // 0=best 63=worst; 10-15 is good
-    cfg.fb_count     = 1;
+    cfg.jpeg_quality = 63;              // lowest quality = smallest file = fastest live view
+                                        // pipeline bumps this to 12 before capture
+    cfg.fb_count     = 2;               // double-buffer: camera writes frame N+1 while we decode N
     cfg.fb_location  = CAMERA_FB_IN_PSRAM;
-    cfg.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
+    cfg.grab_mode    = CAMERA_GRAB_LATEST;  // always return newest frame, never stall
 
     esp_err_t err = esp_camera_init(&cfg);
     if (err != ESP_OK) {
@@ -313,13 +314,19 @@ static bool run_pipeline() {
     Serial.println("pipeline start");
 
     // ── 1. Fresh dedicated capture ───────────────────────────────────────────
-    // Small settle time so camera exposure has stabilised since button press.
+    // Bump JPEG quality to 12 (best) for the pipeline capture, then restore
+    // to 63 (fastest) so live view resumes at full speed after result view.
+    sensor_t* s = esp_camera_sensor_get();
+    if (s) s->set_quality(s, 12);
+
     delay(CAPTURE_SETTLE_MS);
     progress_bar(1);
     if (!grab_frame(g_src)) {
+        if (s) s->set_quality(s, 63);
         Serial.println("capture failed — back to live view");
         return false;
     }
+    if (s) s->set_quality(s, 63);  // restore live-view quality immediately
     Serial.printf("[%lu ms] capture done\n", millis() - t0);
 
     // Show the frozen capture immediately — holds on screen during WiFi scan.
