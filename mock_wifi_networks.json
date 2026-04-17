@@ -1,0 +1,92 @@
+[
+  {
+    "ssid": "Nachbar_2G",
+    "rssi": -42,
+    "bssid": "AA:BB:CC:DD:EE:01",
+    "channel": 6
+  },
+  {
+    "ssid": "Studio_Mesh_Main",
+    "rssi": -38,
+    "bssid": "AA:BB:CC:DD:EE:02",
+    "channel": 11
+  },
+  {
+    "ssid": "Kreuzberg_Wifi",
+    "rssi": -65,
+    "bssid": "AA:BB:CC:DD:EE:03",
+    "channel": 1
+  },
+  {
+    "ssid": "TP-Link_Guest",
+    "rssi": -72,
+    "bssid": "AA:BB:CC:DD:EE:04",
+    "channel": 6
+  },
+  {
+    "ssid": "Vodafone_Hotspot",
+    "rssi": -58,
+    "bssid": "AA:BB:CC:DD:EE:05",
+    "channel": 11
+  },
+  {
+    "ssid": "Berlin_Free_Wifi",
+    "rssi": -78,
+    "bssid": "AA:BB:CC:DD:EE:06",
+    "channel": 1
+  },
+  {
+    "ssid": "OpenWrt_Industrial",
+    "rssi": -55,
+    "bssid": "AA:BB:CC:DD:EE:07",
+    "channel": 8
+  },
+  {
+    "ssid": "Hidden_Network",
+    "rssi": -82,
+    "bssid": "AA:BB:CC:DD:EE:08",
+    "channel": 9
+  },
+  {
+    "ssid": "TIM_WiFi",
+    "rssi": -68,
+    "bssid": "AA:BB:CC:DD:EE:09",
+    "channel": 6
+  },
+  {
+    "ssid": "xfinitywifi",
+    "rssi": -75,
+    "bssid": "AA:BB:CC:DD:EE:0A",
+    "channel": 11
+  },
+  {
+    "ssid": "Cafe_Network",
+    "rssi": -61,
+    "bssid": "AA:BB:CC:DD:EE:0B",
+    "channel": 6
+  },
+  {
+    "ssid": "UPC_WiFi",
+    "rssi": -70,
+    "bssid": "AA:BB:CC:DD:EE:0C",
+    "channel": 11
+  },
+  {
+    "ssid": "Freifunk_Berlin",
+    "rssi": -88,
+    "bssid": "AA:BB:CC:DD:EE:0D",
+    "channel": 1
+  },
+  {
+    "ssid": "O2_Hotspot",
+    "rssi": -52,
+    "bssid": "AA:BB:CC:DD:EE:0E",
+    "channel": 6
+  },
+  {
+    "ssid": "Temporary_Mesh",
+    "rssi": -67,
+    "bssid": "AA:BB:CC:DD:EE:0F",
+    "channel": 8
+  }
+]
