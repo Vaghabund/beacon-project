@@ -1,4 +1,4 @@
-# wifi_rings — ESP32-S3R8 build guide
+# wifi_rings — Waveshare ESP32-S3-Touch-LCD-2 build guide
 
 ## what this does
 
@@ -21,10 +21,10 @@ Deep sleep always wakes into live view — no edge cases.
 
 | part | notes |
 |------|-------|
-| ESP32-S3R8 | the `R8` suffix = 8MB OPI PSRAM, already on chip, no extra wiring |
-| OV5640 | 5MP camera, capture at QVGA (320×240) as JPEG |
-| ST7789 or ILI9341 | 320×240 SPI display, landscape orientation (`setRotation(1)`) |
-| one button | any GPIO, active LOW, internal pullup |
+| Waveshare ESP32-S3-Touch-LCD-2 | ESP32-S3R8, 8MB OPI PSRAM, 16MB flash, built-in ST7789T3 display |
+| OV5640 or OV2640 | camera plugs into the board's 24-pin connector |
+| built-in ST7789T3 | 240×320 native panel, used in landscape via rotation 1 |
+| one button | GPIO0 / BOOT, active LOW, internal pullup |
 
 ---
 
@@ -127,8 +127,8 @@ Deep sleep always wakes into LIVE VIEW — result view is never the wake target.
 ```
 Board:            ESP32S3 Dev Module
 PSRAM:            OPI PSRAM          ← critical, must match R8 chip
-Flash size:       8MB
-Partition scheme: Huge APP (3MB No OTA/1MB SPIFFS)
+Flash size:       16MB
+Partition scheme: Huge APP (3MB No OTA/1MB SPIFFS) or larger app partition
 CPU frequency:    240MHz
 Arduino version:  ≥ 3.x (ESP32 core)
 ```
@@ -137,29 +137,52 @@ Arduino version:  ≥ 3.x (ESP32 core)
 
 | library | version | notes |
 |---------|---------|-------|
-| TFT_eSPI | latest | configure User_Setup.h for your panel |
+| Arduino_GFX_Library | latest | onboard display driver for this board |
 | esp32-camera | bundled with arduino-esp32 core | no install needed |
 
-## TFT_eSPI User_Setup.h
+## built-in display mapping
 
-A ready-to-use `User_Setup.h` is included in this repo. Copy it into the library:
+The Waveshare ESP32-S3-Touch-LCD-2 vendor demos use this LCD map:
 
 ```
-cp User_Setup.h ~/Arduino/libraries/TFT_eSPI/User_Setup.h
+SCLK 39
+MOSI 38
+MISO 40
+DC   42
+CS   45
+RST  -1
+BL   1
 ```
 
-Key settings it sets:
-- `ST7789_DRIVER`, `TFT_WIDTH 320`, `TFT_HEIGHT 240`
-- `SPI_FREQUENCY 80000000` — 80MHz, halves blit time vs 40MHz
-- `ESP32_DMA` — required for ping-pong DMA blit
-- Only GLCD font loaded — smaller binary
+This repo now uses `Arduino_GFX_Library` directly with those pins.
 
-Adjust the pin defines at the top to match your wiring.
+## camera mapping
 
-## GPIO pins to avoid on ESP32-S3R8
+The Waveshare ESP32-S3-Touch-LCD-2 camera mapping used by this repo:
 
-GPIO 35, 36, 37 are used internally by the OPI PSRAM bus.
-Do not assign any peripheral or camera pin to these.
+```
+PWDN  17
+RESET -1
+XCLK   8
+SIOD  21
+SIOC  16
+Y9     2
+Y8     7
+Y7    10
+Y6    14
+Y5    11
+Y4    15
+Y3    13
+Y2    12
+VSYNC  6
+HREF   4
+PCLK   9
+```
+
+## GPIO notes
+
+- GPIO0 is used for button input and sleep wake in this sketch.
+- Use BOOT intentionally during flashing; holding it changes boot mode.
 
 ---
 
@@ -198,7 +221,7 @@ disp_mode       = 0    // 0=radial (fastest, LUT-only)
 wifi_rings.h                    types, RingConfig, API
 wifi_rings.c                    encode algorithm, pure C, no Arduino deps
 wifi_rings_esp32s3.ino          full Arduino sketch
-User_Setup.h                    TFT_eSPI config — copy to Arduino/libraries/TFT_eSPI/
+FIRST_FLASH.md                 first-flash checklist for this board
 wifi_rings_per_signal.html      browser reference — visualise the algorithm
 mock_wifi_networks.json         mock scan data for the browser reference
 README.md                       this file
