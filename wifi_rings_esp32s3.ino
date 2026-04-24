@@ -2,9 +2,9 @@
 //  wifi_rings_esp32s3.ino
 //
 //  Hardware:
-//    ESP32-S3R8 (8MB OPI PSRAM — R8 suffix)
-//    OV5640 camera (or OV2640)
-//    320×240 SPI display (ST7789 / ILI9341), landscape
+//    Waveshare ESP32-S3-Touch-LCD-2 (ESP32-S3R8, 8MB OPI PSRAM, 16MB flash)
+//    OV5640 / OV2640 camera on the board's 24-pin FPC connector
+//    Built-in 240×320 ST7789T3 display, used in landscape via rotation(1)
 //    One push button — GPIO0, active LOW, also wake source
 //
 //  Workflow:
@@ -34,8 +34,8 @@
 //  Arduino IDE settings:
 //    Board:            ESP32S3 Dev Module
 //    PSRAM:            OPI PSRAM   ← critical, must match R8 chip
-//    Flash size:       8MB
-//    Partition scheme: Huge APP (3MB No OTA/1MB SPIFFS)
+//    Flash size:       16MB
+//    Partition scheme: Huge APP (3MB No OTA/1MB SPIFFS) or larger app partition
 //    CPU frequency:    240MHz
 //    Core:             3.x (arduino-esp32)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@
 #include <esp_heap_caps.h>
 #include <esp_sleep.h>
 #include <driver/gpio.h>
-#include <TFT_eSPI.h>
+#include <Arduino_GFX_Library.h>
 
 #include "wifi_rings.h"
 
@@ -60,38 +60,63 @@ static_assert(sizeof(Pixel) == 3, "Pixel struct must be 3 bytes packed");
 #define CAPTURE_SETTLE_MS     100       // ms to let camera settle before fresh capture
 
 // ─── pin assignments ──────────────────────────────────────────────────────────
-// ESP32-S3R8: avoid GPIO 35, 36, 37 (used by OPI PSRAM internally).
+// Waveshare ESP32-S3-Touch-LCD-2 built-in display and camera mappings.
 
 #define PIN_BUTTON      0    // BOOT button = GPIO0, active LOW
 
-// OV5640 — adjust to your module wiring
-#define CAM_PWDN       -1
+// Camera mapping from Waveshare's Arduino examples
+#define CAM_PWDN       17
 #define CAM_RESET      -1
-#define CAM_XCLK       10
-#define CAM_SIOD       40
-#define CAM_SIOC       39
-#define CAM_D7         48
-#define CAM_D6         11
-#define CAM_D5         12
-#define CAM_D4         14
-#define CAM_D3         16
-#define CAM_D2         18
-#define CAM_D1         17
-#define CAM_D0         15
-#define CAM_VSYNC      38
-#define CAM_HREF       47
-#define CAM_PCLK       13
+#define CAM_XCLK       8
+#define CAM_SIOD       21
+#define CAM_SIOC       16
+#define CAM_D7         10
+#define CAM_D6         14
+#define CAM_D5         11
+#define CAM_D4         15
+#define CAM_D3         13
+#define CAM_D2         12
+#define CAM_D1         7
+#define CAM_D0         2
+#define CAM_VSYNC      6
+#define CAM_HREF       4
+#define CAM_PCLK       9
+
+#define LCD_SCLK       39
+#define LCD_MOSI       38
+#define LCD_MISO       40
+#define LCD_DC         42
+#define LCD_RST        -1
+#define LCD_CS         45
+#define LCD_BL         1
+#define LCD_ROTATION   1
+
+static constexpr uint16_t COLOR_BLACK = 0x0000;
+static constexpr uint16_t COLOR_WHITE = 0xFFFF;
+static constexpr uint16_t COLOR_RED = 0xF800;
+static constexpr uint16_t COLOR_DARKGREY = 0x7BEF;
 
 // ─── globals ──────────────────────────────────────────────────────────────────
-TFT_eSPI tft;
+Arduino_DataBus* g_lcd_bus = new Arduino_ESP32SPI(
+    LCD_DC,
+    LCD_CS,
+    LCD_SCLK,
+    LCD_MOSI,
+    LCD_MISO
+);
+Arduino_GFX* tft = new Arduino_ST7789(
+    g_lcd_bus,
+    LCD_RST,
+    LCD_ROTATION,
+    true,
+    240,
+    320
+);
 
 // PSRAM framebuffers — allocated once in setup(), never freed
 Pixel*    g_src    = nullptr;   // decoded camera RGB888
 Pixel*    g_dst    = nullptr;   // encoded output RGB888
-
-// DMA line buffers — ping-pong, must stay in internal SRAM
-uint16_t* g_dma_a  = nullptr;
-uint16_t* g_dma_b  = nullptr;
+uint16_t* g_frame565 = nullptr; // display staging buffer in RGB565
 
 // WiFi scan results
 WifiNetwork g_nets[MAX_NETWORKS];
@@ -112,35 +137,35 @@ AppState g_state = AppState::LIVE_VIEW;
 
 static void progress_bar(int stage) {
     const int filled = (IMG_W * stage) / PROGRESS_STAGES;
-    tft.fillRect(0,      PROGRESS_Y, filled,         PROGRESS_H, TFT_WHITE);
-    tft.fillRect(filled, PROGRESS_Y, IMG_W - filled,  PROGRESS_H, TFT_DARKGREY);
+    tft->fillRect(0,      PROGRESS_Y, filled,         PROGRESS_H, COLOR_WHITE);
+    tft->fillRect(filled, PROGRESS_Y, IMG_W - filled,  PROGRESS_H, COLOR_DARKGREY);
 }
 
 // ─── centered text overlay on top of whatever is on screen ───────────────────
 // Dark pill behind white text — readable over any image content.
 static void overlay_text(const char* msg) {
     const int pad_x = 10, pad_y = 5;
-    const int cw = 6, ch = 8;          // TFT_eSPI textSize 1 glyph size
+    const int cw = 6, ch = 8;
     const int len = strlen(msg);
     const int tw = len * cw;
     const int bw = tw + pad_x * 2;
     const int bh = ch + pad_y * 2;
     const int bx = (IMG_W - bw) / 2;
     const int by = (IMG_H - bh) / 2;
-    tft.fillRect(bx, by, bw, bh, TFT_BLACK);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.setTextSize(1);
-    tft.setCursor(bx + pad_x, by + pad_y);
-    tft.print(msg);
+    tft->fillRect(bx, by, bw, bh, COLOR_BLACK);
+    tft->setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft->setTextSize(1);
+    tft->setCursor(bx + pad_x, by + pad_y);
+    tft->print(msg);
 }
 
 // ─── fatal error — halts with red message ─────────────────────────────────────
 static void fatal(const char* msg) {
-    tft.fillRect(0, 0, IMG_W, 16, TFT_BLACK);
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.setTextSize(1);
-    tft.setCursor(4, 4);
-    tft.print(msg);
+    tft->fillRect(0, 0, IMG_W, 16, COLOR_BLACK);
+    tft->setTextColor(COLOR_RED, COLOR_BLACK);
+    tft->setTextSize(1);
+    tft->setCursor(4, 4);
+    tft->print(msg);
     Serial.printf("FATAL: %s\n", msg);
     while (true) delay(1000);
 }
@@ -226,18 +251,10 @@ static bool camera_init() {
 // ─── blit one decoded RGB888 frame to display (no rings, live view) ───────────
 // src must be IMG_W×IMG_H RGB888 in PSRAM.
 static void blit_frame(const Pixel* src) {
-    tft.startWrite();
-    tft.setAddrWindow(0, 0, IMG_W, IMG_H);
-    rings_to_rgb565_line(&src[0], g_dma_a, IMG_W);
     for (int y = 0; y < IMG_H; y++) {
-        uint16_t* send = (y % 2 == 0) ? g_dma_a : g_dma_b;
-        uint16_t* prep = (y % 2 == 0) ? g_dma_b : g_dma_a;
-        tft.pushImageDMA(0, y, IMG_W, 1, send);
-        if (y + 1 < IMG_H)
-            rings_to_rgb565_line(&src[(y + 1) * IMG_W], prep, IMG_W);
-        tft.dmaWait();
+        rings_to_rgb565_line(&src[y * IMG_W], &g_frame565[y * IMG_W], IMG_W);
     }
-    tft.endWrite();
+    tft->draw16bitRGBBitmap(0, 0, g_frame565, IMG_W, IMG_H);
 }
 
 // ─── grab one JPEG frame, decode to dst, return false on failure ──────────────
@@ -407,9 +424,13 @@ void setup() {
     Serial.println("\n\n=== wifi_rings boot ===");
 
     // ── display ──────────────────────────────────────────────────────────────
-    tft.init();
-    tft.setRotation(1);  // landscape — matches QVGA 320×240 directly
-    tft.fillScreen(TFT_BLACK);
+    pinMode(LCD_BL, OUTPUT);
+    digitalWrite(LCD_BL, HIGH);
+    if (!tft->begin()) {
+        Serial.println("display init failed");
+        while (true) delay(1000);
+    }
+    tft->fillScreen(COLOR_BLACK);
 
     // ── button ───────────────────────────────────────────────────────────────
     pinMode(PIN_BUTTON, INPUT_PULLUP);
@@ -423,14 +444,8 @@ void setup() {
     // ── allocate PSRAM framebuffers ───────────────────────────────────────────
     g_src = (Pixel*)heap_caps_malloc(IMG_PIXELS * sizeof(Pixel), MALLOC_CAP_SPIRAM);
     g_dst = (Pixel*)heap_caps_malloc(IMG_PIXELS * sizeof(Pixel), MALLOC_CAP_SPIRAM);
-    if (!g_src || !g_dst) fatal("PSRAM alloc failed");
-
-    // ── allocate DMA line buffers — internal SRAM only ───────────────────────
-    g_dma_a = (uint16_t*)heap_caps_malloc(IMG_W * sizeof(uint16_t),
-                                           MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    g_dma_b = (uint16_t*)heap_caps_malloc(IMG_W * sizeof(uint16_t),
-                                           MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!g_dma_a || !g_dma_b) fatal("DMA buf alloc failed");
+    g_frame565 = (uint16_t*)heap_caps_malloc(IMG_PIXELS * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+    if (!g_src || !g_dst || !g_frame565) fatal("PSRAM alloc failed");
 
     // ── trig LUT ─────────────────────────────────────────────────────────────
     rings_init();
