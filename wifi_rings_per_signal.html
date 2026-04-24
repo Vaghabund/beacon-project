@@ -1,0 +1,445 @@
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+.root{padding:1rem 0;font-family:var(--font-mono,monospace)}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+.layout{display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start}
+.col-l{flex:0 0 200px;min-width:160px}
+.col-r{flex:1;min-width:240px}
+.sec{margin-bottom:12px}
+.sl{font-size:10px;color:var(--color-text-tertiary);letter-spacing:.07em;margin-bottom:4px}
+.ap-row{display:flex;align-items:center;gap:5px;padding:4px 6px;border-radius:5px;border:.5px solid var(--color-border-tertiary);background:var(--color-background-secondary);margin-bottom:3px;font-size:10px}
+.ap-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.ap-ssid{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-primary)}
+.ap-dbm{color:var(--color-text-tertiary);white-space:nowrap;font-size:9px}
+.ap-rank{font-size:9px;color:var(--color-text-tertiary);min-width:12px;text-align:right}
+.bw{width:28px;height:3px;background:var(--color-border-tertiary);border-radius:2px;flex-shrink:0}
+.bf{height:100%;border-radius:2px}
+.slrow{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.slrow label{font-size:10px;color:var(--color-text-secondary);min-width:82px;flex-shrink:0}
+.slrow input[type=range]{flex:1;min-width:50px}
+.slrow span{font-size:10px;font-weight:500;min-width:26px;text-align:right;color:var(--color-text-primary)}
+select{font-size:10px;padding:3px 5px;border-radius:5px;border:.5px solid var(--color-border-secondary);background:var(--color-background-secondary);color:var(--color-text-primary);width:100%;margin-bottom:4px}
+.btn-row{display:flex;gap:5px;flex-wrap:wrap;margin-top:5px}
+button{padding:3px 9px;font-size:10px;border-radius:5px;border:.5px solid var(--color-border-secondary);background:transparent;color:var(--color-text-primary);cursor:pointer;white-space:nowrap}
+button:hover{background:var(--color-background-secondary)}
+#mainC{display:block;width:100%;border-radius:6px;border:.5px solid var(--color-border-tertiary);image-rendering:pixelated}
+.meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.mp{font-size:9px;color:var(--color-text-secondary);padding:2px 6px;border-radius:3px;background:var(--color-background-secondary);border:.5px solid var(--color-border-tertiary)}
+.upload-z{border:.5px dashed var(--color-border-secondary);border-radius:5px;padding:8px;text-align:center;font-size:10px;color:var(--color-text-secondary);cursor:pointer;margin-bottom:5px;background:var(--color-background-secondary);line-height:1.5}
+.upload-z:hover{border-color:var(--color-border-primary)}
+textarea{width:100%;font-family:var(--font-mono);font-size:10px;padding:4px 5px;border-radius:5px;border:.5px solid var(--color-border-tertiary);background:var(--color-background-secondary);color:var(--color-text-primary);resize:vertical}
+.ring-legend{margin-top:6px}
+.rl-row{display:flex;align-items:center;gap:6px;margin-bottom:3px}
+.rl-swatch{width:32px;height:4px;border-radius:2px;flex-shrink:0}
+.rl-text{font-size:9px;color:var(--color-text-secondary)}
+.rl-bar{flex:1;height:3px;border-radius:2px;background:var(--color-border-tertiary)}
+.rl-fill{height:100%;border-radius:2px;background:var(--color-text-primary)}
+</style>
+
+<div class="root">
+<h2 class="sr-only">wifi per-ring signal intensity — each ring encodes one SSID via pixel sorting, signal strength controls luminance boost within that ring only, strongest network innermost</h2>
+<div class="layout">
+
+<div class="col-l">
+
+  <div class="sec">
+    <div class="sl">networks · sorted by signal</div>
+    <div id="apList"></div>
+    <div class="btn-row">
+      <button onclick="rescan()">demo</button>
+      <button onclick="simCity()">city</button>
+      <button onclick="simNature()">nature</button>
+      <button onclick="addNet()">+ add</button>
+    </div>
+  </div>
+
+  <div class="sec">
+    <div class="sl">ring legend</div>
+    <div class="ring-legend" id="ringLegend"></div>
+  </div>
+
+  <div class="sec">
+    <div class="sl">paste json / iwlist</div>
+    <textarea id="pa" rows="2" placeholder='[{"ssid":"X","dbm":-65}]'></textarea>
+    <div class="btn-row"><button onclick="parsePaste()">parse</button></div>
+  </div>
+
+  <div class="sec">
+    <div class="sl">source image</div>
+    <div class="upload-z" onclick="document.getElementById('iu').click()">upload image</div>
+    <input type="file" id="iu" accept="image/*" style="display:none">
+    <div class="btn-row">
+      <button onclick="useGenerated()">generated</button>
+      <button onclick="useDark()">dark</button>
+    </div>
+  </div>
+
+  <div class="sec">
+    <div class="sl">ring geometry</div>
+    <div class="slrow"><label>inner radius</label><input type="range" id="rMin" min="6" max="70" value="18" step="1" oninput="sync('rMin')"><span id="rMin-v">18</span></div>
+    <div class="slrow"><label>ring thickness</label><input type="range" id="rThick" min="6" max="50" value="22" step="1" oninput="sync('rThick')"><span id="rThick-v">22</span></div>
+    <div class="slrow"><label>ring gap</label><input type="range" id="rGap" min="0" max="14" value="2" step="1" oninput="sync('rGap')"><span id="rGap-v">2</span></div>
+  </div>
+
+  <div class="sec">
+    <div class="sl">sort + intensity</div>
+    <div class="slrow"><label>max sort px</label><input type="range" id="maxD" min="2" max="40" value="18" step="1" oninput="sync('maxD')"><span id="maxD-v">18</span></div>
+    <div class="slrow"><label>intensity mode</label>
+      <select id="intMode" onchange="render()">
+        <option value="lift">luminance lift</option>
+        <option value="gain">gain multiply</option>
+        <option value="gamma">gamma</option>
+        <option value="sat">saturation boost</option>
+        <option value="contrast">contrast</option>
+      </select>
+    </div>
+    <div class="slrow"><label>max intensity</label><input type="range" id="maxInt" min="10" max="200" value="90" step="1" oninput="sync('maxInt')"><span id="maxInt-v">90</span></div>
+    <div class="slrow"><label>min intensity</label><input type="range" id="minInt" min="0" max="60" value="8" step="1" oninput="sync('minInt')"><span id="minInt-v">8</span></div>
+    <div class="slrow"><label>sort direction</label>
+      <select id="sortDir" onchange="render()">
+        <option value="lum_asc">dark inward</option>
+        <option value="lum_desc">bright inward</option>
+        <option value="hue">by hue</option>
+        <option value="sat">by saturation</option>
+      </select>
+    </div>
+    <div class="slrow"><label>ring outlines</label><input type="range" id="showR" min="0" max="1" value="0" step="1" oninput="sync('showR')"><span id="showR-v">off</span></div>
+  </div>
+
+  <div class="sec">
+    <div class="sl">device</div>
+    <select id="devSz" onchange="setDev()">
+      <option value="240x320">ESP-S3 240×320</option>
+      <option value="320x240">landscape 320×240</option>
+      <option value="480x320">480×320</option>
+      <option value="360x360">square 360</option>
+    </select>
+  </div>
+
+  <div class="btn-row">
+    <button onclick="render()" style="font-weight:500">render</button>
+    <button onclick="dl()">download</button>
+  </div>
+</div>
+
+<div class="col-r">
+  <canvas id="mainC" width="240" height="320"></canvas>
+  <div class="meta" id="metaRow"></div>
+</div>
+
+</div>
+</div>
+
+<script>
+const MC = document.getElementById('mainC');
+const mctx = MC.getContext('2d');
+const COLORS=['#378ADD','#1D9E75','#E24B4A','#BA7517','#7F77DD','#D4537E','#D85A30','#5DCAA5','#97C459','#F09595'];
+
+let nets=[], baseImageData=null;
+
+function dbmToS(d){ return Math.max(0,Math.min(100,Math.round((d+100)/70*100))); }
+function sigCol(s){ return s>65?'#1D9E75':s>35?'#BA7517':'#E24B4A'; }
+function gv(id){ return parseFloat(document.getElementById(id).value); }
+
+function sync(id){
+  const v=gv(id);
+  const el=document.getElementById(id+'-v');
+  if(id==='showR') el.textContent=v>0?'on':'off';
+  else el.textContent=Math.round(v);
+  render();
+}
+
+function rescan(){
+  nets=[
+    {ssid:'FritzBox_7590',dbm:-42,ch:6},
+    {ssid:'Telekom_HSI',dbm:-58,ch:11},
+    {ssid:'WLAN-Nachbar',dbm:-71,ch:1},
+    {ssid:'AndroidAP',dbm:-79,ch:6},
+    {ssid:'eduroam',dbm:-87,ch:36},
+  ].map((n,i)=>({...n,color:COLORS[i%COLORS.length]}));
+  renderList(); render();
+}
+
+function simCity(){
+  nets=[
+    {ssid:'UPC_HomeNet',dbm:-33,ch:6},
+    {ssid:'Vodafone_5G',dbm:-39,ch:36},
+    {ssid:'FRITZ_7590',dbm:-44,ch:1},
+    {ssid:'eduroam',dbm:-48,ch:11},
+    {ssid:'Telekom_HSI',dbm:-52,ch:6},
+    {ssid:'iPhone_Hotspot',dbm:-56,ch:6},
+    {ssid:'CafeWLAN',dbm:-61,ch:11},
+    {ssid:'hidden_net',dbm:-68,ch:36},
+  ].map((n,i)=>({...n,color:COLORS[i%COLORS.length]}));
+  renderList(); render();
+}
+
+function simNature(){
+  nets=[
+    {ssid:'FernWLAN',dbm:-93,ch:6},
+  ].map((n,i)=>({...n,color:COLORS[i%COLORS.length]}));
+  renderList(); render();
+}
+
+function addNet(){
+  const s=prompt('SSID:'); if(!s) return;
+  const d=parseInt(prompt('dBm (e.g. -65):')||'-70');
+  nets.push({ssid:s,dbm:isNaN(d)?-70:d,ch:6,color:COLORS[nets.length%COLORS.length]});
+  renderList(); render();
+}
+
+function parsePaste(){
+  const t=document.getElementById('pa').value; const p=[];
+  try{
+    const j=JSON.parse(t); const arr=Array.isArray(j)?j:[j];
+    arr.forEach(e=>{ if(e.ssid) p.push({ssid:e.ssid,dbm:e.dbm||e.signal||-70,ch:e.channel||6,color:COLORS[p.length%COLORS.length]}); });
+  }catch(_){
+    const lines=t.split('\n'); let cur={};
+    lines.forEach(l=>{
+      const em=l.match(/ESSID[:\s"]+([^"\n]+)/i);
+      if(em){if(cur.ssid) p.push({...cur,color:COLORS[p.length%COLORS.length]}); cur={ssid:em[1].trim(),dbm:-70,ch:6};}
+      const sm=l.match(/[Ss]ignal[^=]*=\s*(-?\d+)/); if(sm) cur.dbm=parseInt(sm[1]);
+    });
+    if(cur.ssid) p.push({...cur,color:COLORS[p.length%COLORS.length]});
+  }
+  if(p.length){ nets=p; renderList(); render(); }
+}
+
+function renderList(){
+  const sorted=[...nets].sort((a,b)=>b.dbm-a.dbm);
+  const el=document.getElementById('apList'); el.innerHTML='';
+  sorted.forEach((n,i)=>{
+    const s=dbmToS(n.dbm);
+    const row=document.createElement('div'); row.className='ap-row';
+    row.innerHTML=`<span class="ap-rank">${i+1}</span><div class="ap-dot" style="background:${n.color}"></div><span class="ap-ssid">${n.ssid}</span><div class="bw"><div class="bf" style="width:${s}%;background:${sigCol(s)}"></div></div><span class="ap-dbm">${n.dbm}</span>`;
+    el.appendChild(row);
+  });
+}
+
+function updateRingLegend(sorted){
+  const el=document.getElementById('ringLegend'); el.innerHTML='';
+  const maxInt=gv('maxInt'), minInt=gv('minInt');
+  sorted.forEach((n,i)=>{
+    const s=dbmToS(n.dbm);
+    const intT=s/100;
+    const intPx=Math.round(minInt+intT*(maxInt-minInt));
+    const row=document.createElement('div'); row.className='rl-row';
+    const barW=Math.round(intT*100);
+    row.innerHTML=`<div class="rl-swatch" style="background:${n.color};opacity:${0.3+intT*0.7}"></div><span class="rl-text" style="min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${n.ssid.slice(0,10)}</span><div class="rl-bar"><div class="rl-fill" style="width:${barW}%;background:${n.color};opacity:${0.4+intT*0.6}"></div></div><span class="rl-text">${n.dbm}</span>`;
+    el.appendChild(row);
+  });
+}
+
+function ssidToDigits(ssid){
+  const digits=[];
+  for(let i=0;i<ssid.length;i++){
+    const c=ssid.charCodeAt(i);
+    digits.push(Math.floor((c%100)/10));
+    digits.push(c%10);
+  }
+  return digits;
+}
+
+function lum(r,g,b){ return 0.299*r+0.587*g+0.114*b; }
+function hueVal(r,g,b){
+  const nr=r/255,ng=g/255,nb=b/255;
+  const mx=Math.max(nr,ng,nb),mn=Math.min(nr,ng,nb),d=mx-mn;
+  if(d===0) return 0;
+  if(mx===nr) return((ng-nb)/d+6)%6;
+  if(mx===ng) return(nb-nr)/d+2;
+  return(nr-ng)/d+4;
+}
+function satVal(r,g,b){
+  const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+  return mx===0?0:(mx-mn)/mx;
+}
+function sortKey(r,g,b,dir){
+  if(dir==='lum_asc') return lum(r,g,b);
+  if(dir==='lum_desc') return -lum(r,g,b);
+  if(dir==='hue') return hueVal(r,g,b);
+  return satVal(r,g,b);
+}
+
+function applyIntensity(r,g,b, t, mode, amount){
+  let nr=r,ng=g,nb=b;
+  if(mode==='lift'){
+    const lift=Math.round(t*amount);
+    nr=Math.min(255,r+lift); ng=Math.min(255,g+lift); nb=Math.min(255,b+lift);
+  } else if(mode==='gain'){
+    const gain=1+t*(amount/40);
+    nr=Math.min(255,Math.round(r*gain)); ng=Math.min(255,Math.round(g*gain)); nb=Math.min(255,Math.round(b*gain));
+  } else if(mode==='gamma'){
+    const gamma=Math.max(0.15,1-t*0.82);
+    nr=Math.min(255,Math.round(255*Math.pow(r/255,gamma)));
+    ng=Math.min(255,Math.round(255*Math.pow(g/255,gamma)));
+    nb=Math.min(255,Math.round(255*Math.pow(b/255,gamma)));
+  } else if(mode==='sat'){
+    const l=lum(r,g,b);
+    const boost=1+t*(amount/30);
+    nr=Math.min(255,Math.max(0,Math.round(l+(r-l)*boost)));
+    ng=Math.min(255,Math.max(0,Math.round(l+(g-l)*boost)));
+    nb=Math.min(255,Math.max(0,Math.round(l+(b-l)*boost)));
+  } else if(mode==='contrast'){
+    const mid=128;
+    const factor=1+t*(amount/50);
+    nr=Math.min(255,Math.max(0,Math.round(mid+(r-mid)*factor)));
+    ng=Math.min(255,Math.max(0,Math.round(mid+(g-mid)*factor)));
+    nb=Math.min(255,Math.max(0,Math.round(mid+(b-mid)*factor)));
+  }
+  return [nr,ng,nb];
+}
+
+function buildBase(){
+  const W=MC.width,H=MC.height;
+  const off=document.createElement('canvas'); off.width=W; off.height=H;
+  const ox=off.getContext('2d');
+  for(let x=0;x<W;x++) for(let y=0;y<H;y++){
+    const r=Math.round(55+Math.sin(x*0.05+y*0.02)*50+Math.cos(y*0.06)*28);
+    const g=Math.round(45+Math.cos(x*0.04)*42+Math.sin((x+y)*0.03)*32);
+    const b=Math.round(75+Math.sin(x*0.06)*48+Math.cos(x*0.025+y*0.05)*38);
+    ox.fillStyle=`rgb(${r},${g},${b})`; ox.fillRect(x,y,1,1);
+  }
+  baseImageData=ox.getImageData(0,0,W,H);
+}
+
+function useDark(){
+  const W=MC.width,H=MC.height;
+  const off=document.createElement('canvas'); off.width=W; off.height=H;
+  const ox=off.getContext('2d');
+  for(let x=0;x<W;x++) for(let y=0;y<H;y++){
+    const v=Math.round(14+Math.sin(x*0.09)*7+Math.cos(y*0.08)*5);
+    ox.fillStyle=`rgb(${v},${v},${v})`; ox.fillRect(x,y,1,1);
+  }
+  baseImageData=ox.getImageData(0,0,W,H); render();
+}
+
+function useGenerated(){ buildBase(); render(); }
+
+document.getElementById('iu').onchange=e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const img=new Image(); img.onload=()=>{
+    const W=MC.width,H=MC.height;
+    const off=document.createElement('canvas'); off.width=W; off.height=H;
+    const ox=off.getContext('2d'); ox.drawImage(img,0,0,W,H);
+    baseImageData=ox.getImageData(0,0,W,H); render();
+  };
+  img.src=URL.createObjectURL(f);
+};
+
+function setDev(){
+  const v=document.getElementById('devSz').value.split('x');
+  MC.width=parseInt(v[0]); MC.height=parseInt(v[1]);
+  buildBase(); render();
+}
+
+function render(){
+  if(!nets.length) return;
+  if(!baseImageData) buildBase();
+
+  const W=MC.width, H=MC.height;
+  const sorted=[...nets].sort((a,b)=>b.dbm-a.dbm);
+
+  const rMin=gv('rMin'), rThick=gv('rThick'), rGap=gv('rGap');
+  const maxD=gv('maxD');
+  const maxInt=gv('maxInt'), minInt=gv('minInt');
+  const intMode=document.getElementById('intMode').value;
+  const sortDir=document.getElementById('sortDir').value;
+  const showR=gv('showR')>0;
+  const cx=Math.round(W/2), cy=Math.round(H/2);
+
+  const src=baseImageData.data;
+  const dst=new Uint8ClampedArray(src);
+
+  sorted.forEach((n,ri)=>{
+    const s=dbmToS(n.dbm);
+    const intT=s/100;
+    const ringIntensity=minInt+intT*(maxInt-minInt);
+
+    const inner=rMin+ri*(rThick+rGap);
+    const outer=inner+rThick;
+    if(inner>Math.min(W,H)*0.72) return;
+
+    const digits=ssidToDigits(n.ssid);
+    const midR=(inner+outer)/2;
+    const circ=Math.round(2*Math.PI*midR);
+    const totalAngles=Math.max(circ,360);
+
+    for(let ai=0;ai<totalAngles;ai++){
+      const angle=(ai/totalAngles)*Math.PI*2 - Math.PI/2;
+      const d=digits[ai%digits.length];
+      const ca=Math.cos(angle), sa=Math.sin(angle);
+
+      const pixels=[];
+      for(let r=inner;r<=outer;r++){
+        const px=Math.round(cx+ca*r);
+        const py=Math.round(cy+sa*r);
+        if(px<0||px>=W||py<0||py>=H) continue;
+        const idx=(py*W+px)*4;
+        pixels.push({px,py,r:dst[idx],g:dst[idx+1],b:dst[idx+2],a:dst[idx+3],idx});
+      }
+      if(!pixels.length) continue;
+
+      if(d>0){
+        const sortLen=Math.max(2,Math.round((d/9)*maxD));
+        const toSort=pixels.slice(0,Math.min(sortLen,pixels.length));
+        toSort.sort((a,b)=>sortKey(a.r,a.g,a.b,sortDir)-sortKey(b.r,b.g,b.b,sortDir));
+        toSort.forEach((p,k)=>{
+          if(k>=pixels.length) return;
+          const orig=pixels[k];
+          dst[orig.idx]=p.r; dst[orig.idx+1]=p.g; dst[orig.idx+2]=p.b; dst[orig.idx+3]=p.a;
+        });
+      }
+
+      pixels.forEach(p=>{
+        const [nr,ng,nb]=applyIntensity(dst[p.idx],dst[p.idx+1],dst[p.idx+2],intT,intMode,ringIntensity);
+        dst[p.idx]=nr; dst[p.idx+1]=ng; dst[p.idx+2]=nb;
+      });
+    }
+  });
+
+  mctx.putImageData(new ImageData(dst,W,H),0,0);
+
+  if(showR){
+    sorted.forEach((n,ri)=>{
+      const inner=rMin+ri*(rThick+rGap);
+      const outer=inner+rThick;
+      if(inner>Math.min(W,H)*0.72) return;
+      mctx.save();
+      mctx.strokeStyle=n.color; mctx.lineWidth=0.5; mctx.globalAlpha=0.3;
+      mctx.beginPath(); mctx.arc(cx,cy,inner,0,Math.PI*2); mctx.stroke();
+      mctx.beginPath(); mctx.arc(cx,cy,outer,0,Math.PI*2); mctx.stroke();
+      const fs=Math.max(7,Math.min(9,rThick-1));
+      mctx.font=`500 ${fs}px monospace`;
+      mctx.fillStyle=n.color; mctx.globalAlpha=0.75; mctx.textAlign='left';
+      const lx=cx+Math.cos(-Math.PI*0.47)*(outer+2);
+      const ly=cy+Math.sin(-Math.PI*0.47)*(outer+2);
+      mctx.fillText(n.ssid.slice(0,10),lx,ly);
+      mctx.restore();
+    });
+  }
+
+  updateRingLegend(sorted);
+  updateMeta(sorted);
+}
+
+function updateMeta(sorted){
+  const el=document.getElementById('metaRow'); el.innerHTML='';
+  const n=sorted.length;
+  const strongest=sorted[0], weakest=sorted[n-1];
+  [
+    `${n} net${n!==1?'s':''}`,
+    strongest?`inner ${strongest.dbm} dBm`:'',
+    weakest&&n>1?`outer ${weakest.dbm} dBm`:'',
+    `${MC.width}×${MC.height}`
+  ].filter(Boolean).forEach(txt=>{
+    const d=document.createElement('div'); d.className='mp'; d.textContent=txt; el.appendChild(d);
+  });
+}
+
+function dl(){
+  const a=document.createElement('a'); a.download='wifi_rings.png'; a.href=MC.toDataURL('image/png'); a.click();
+}
+
+rescan();
+</script>
