@@ -1,0 +1,6 @@
+{
+  "name": "beacon-web",
+  "private": true,
+  "type": "module",
+  "description": "Beacon image decoder — drop a BMP, recover the hidden WiFi scan"
+}

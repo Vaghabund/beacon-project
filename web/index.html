@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BEACON // SIGINT</title>
+<style>
+  :root{
+    --bg:#05080a; --panel:#0a1012; --panel2:#0c1518; --line:#16302e;
+    --fg:#c8f7e2; --dim:#5d7d76; --accent:#36f5a8; --amber:#ffb454; --red:#ff5d5d; --cyan:#41d6ff;
+    --mono:ui-monospace,"JetBrains Mono","SFMono-Regular",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--mono);font-size:13px;line-height:1.45}
+  body{
+    background-image:
+      linear-gradient(rgba(54,245,168,.03) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(54,245,168,.03) 1px,transparent 1px);
+    background-size:34px 34px;
+    min-height:100vh;padding:18px;
+  }
+  a{color:var(--cyan)}
+  .wrap{max-width:1000px;margin:0 auto}
+  .hdr{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:16px}
+  .hdr h1{font-size:18px;letter-spacing:.18em;margin:0;color:var(--accent);text-shadow:0 0 12px rgba(54,245,168,.4)}
+  .hdr .sub{color:var(--dim);letter-spacing:.1em;font-size:11px}
+  .hdr .tag{margin-left:auto;color:var(--dim);font-size:11px}
+  .lbl{color:var(--dim);text-transform:uppercase;letter-spacing:.16em;font-size:10px}
+
+  .drop{
+    border:1px dashed var(--line);border-radius:8px;padding:34px 18px;text-align:center;
+    background:var(--panel);cursor:pointer;transition:.15s;position:relative;
+  }
+  .drop:hover,.drop.hot{border-color:var(--accent);background:var(--panel2);box-shadow:0 0 28px rgba(54,245,168,.12) inset}
+  .drop .big{font-size:15px;letter-spacing:.14em;color:var(--fg)}
+  .drop .hint{color:var(--dim);font-size:11px;margin-top:6px}
+
+  .status{margin:16px 0;padding:9px 12px;border-left:3px solid var(--accent);background:var(--panel);font-size:12px;letter-spacing:.06em}
+  .status.bad{border-color:var(--red);color:var(--red)}
+  .status .ok{color:var(--accent)}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:11px 12px;position:relative}
+  .tile .v{font-size:22px;color:var(--accent);letter-spacing:.04em}
+  .tile .v small{font-size:12px;color:var(--dim)}
+
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:13px 14px;margin-bottom:16px}
+  .panel > .lbl{display:block;margin-bottom:10px}
+
+  .net{display:grid;grid-template-columns:26px 1fr 132px 150px;gap:10px;align-items:center;
+       padding:9px 6px;border-top:1px solid var(--line)}
+  .net:first-of-type{border-top:none}
+  .net .rank{color:var(--dim);text-align:right}
+  .net .ssid{color:var(--fg);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .net .ssid.hidden{color:var(--dim);font-style:italic;font-weight:400}
+  .net .bssid{color:var(--cyan);font-size:11px}
+  .net .vendor{color:var(--dim);font-size:11px}
+  .net .meta{color:var(--dim);font-size:11px}
+  .net .chip{display:inline-block;padding:1px 6px;border:1px solid var(--line);border-radius:4px;font-size:10px;color:var(--amber)}
+  .bar{height:6px;background:#0c1c1a;border-radius:3px;overflow:hidden;margin-top:4px}
+  .bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--red),var(--amber),var(--accent))}
+  .dbm{color:var(--accent)}
+
+  .chan{display:flex;gap:6px;flex-wrap:wrap}
+  .chan .c{background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:5px 9px;font-size:11px}
+  .chan .c b{color:var(--accent)} .chan .c .n{color:var(--dim);margin-left:5px}
+
+  .geo{border-style:dashed;opacity:.85}
+  .geo button{font-family:var(--mono);background:transparent;border:1px solid var(--line);color:var(--dim);
+    padding:6px 12px;border-radius:5px;letter-spacing:.1em;cursor:not-allowed}
+  .bssid-list{color:var(--cyan);font-size:11px;word-break:break-all;margin-top:8px}
+
+  pre.raw{background:#04090a;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;
+    font-size:11px;color:var(--dim);max-height:170px;margin:0}
+  details summary{cursor:pointer;color:var(--dim);letter-spacing:.12em;font-size:10px;text-transform:uppercase}
+  .hide{display:none}
+  .foot{color:var(--dim);font-size:10px;margin-top:18px;border-top:1px solid var(--line);padding-top:8px}
+  @media(max-width:620px){.net{grid-template-columns:22px 1fr;gap:4px}.net .vendorcell,.net .metacell{grid-column:2}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hdr">
+    <h1>◈ BEACON</h1><span class="sub">SIGNAL INTELLIGENCE // IMAGE DECODE</span>
+    <span class="tag" id="tag">WBCN v1 · LSB</span>
+  </div>
+
+  <div class="drop" id="drop">
+    <div class="big">⊹ DROP CAPTURE</div>
+    <div class="hint">24-bit BMP from the device &nbsp;·&nbsp; click to browse &nbsp;·&nbsp; decoded locally, nothing leaves this machine</div>
+    <input type="file" id="file" accept=".bmp,image/bmp" class="hide">
+  </div>
+
+  <div id="out"></div>
+
+  <div class="foot">
+    no capture? generate one: <code>python tools/test_data_roundtrip.py</code> → drop <code>_roundtrip.bmp</code>.
+    &nbsp;serve this folder with <code>python -m http.server</code> and open it via http:// (ES modules don't load from file://).
+  </div>
+</div>
+
+<script type="module">
+import { decodeBeacon } from './decode.js';
+
+// ── tiny OUI table (extend freely) ──────────────────────────────────────────
+const OUI = {
+  '0017F2':'Apple','3C0754':'Apple','F0B479':'Apple',
+  '001A11':'Google','3042A1':'Google',
+  'D85D4C':'TP-Link','5C628B':'TP-Link','001451':'TP-Link',
+  '001B63':'Netgear','A040A0':'Netgear',
+  '802AA8':'Ubiquiti','24A43C':'Ubiquiti','FCECDA':'Ubiquiti',
+  'C0C9E3':'AVM (Fritz!Box)','3810D5':'AVM (Fritz!Box)',
+  '001018':'Broadcom','000C29':'VMware','B827EB':'Raspberry Pi','DC A6 32':'Raspberry Pi',
+  '0050F2':'Microsoft','001A2B':'Cisco','00000C':'Cisco','E0286D':'AVM',
+};
+const vendor = b => OUI[b.replace(/:/g,'').slice(0,6).toUpperCase()] || '—';
+const band  = ch => ch>=1 && ch<=14 ? '2.4 GHz' : (ch>=32 && ch<=177 ? '5 GHz' : '?');
+const sigPct = d => Math.max(0, Math.min(100, Math.round((d + 90) / 60 * 100)));   // -90..-30
+const dist  = d => { const v = Math.pow(10, (-40 - d) / (10 * 2.7)); return v < 10 ? v.toFixed(1) : Math.round(v); }; // rough path-loss
+const esc   = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+const out = document.getElementById('out');
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('file');
+
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => { if (e.target.files[0]) handle(e.target.files[0]); });
+['dragenter','dragover'].forEach(ev => addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hot'); }));
+['dragleave','drop'].forEach(ev => addEventListener(ev, e => { e.preventDefault(); if (ev==='drop'||e.target===document) drop.classList.remove('hot'); }));
+addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('hot'); const f = e.dataTransfer.files[0]; if (f) handle(f); });
+
+async function handle(file){
+  try{
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const r = decodeBeacon(buf);
+    render(file, r);
+  }catch(err){
+    out.innerHTML = `<div class="status bad">⛔ DECODE FAILED // ${esc(String(err.message || err))}</div>`;
+  }
+}
+
+function render(file, r){
+  const nets = [...r.networks].sort((a,b)=>b.rssi-a.rssi);
+  const bands = new Set(nets.map(n=>band(n.channel)));
+  const chans = {}; nets.forEach(n=>chans[n.channel]=(chans[n.channel]||0)+1);
+  const strongest = nets.length ? nets[0].rssi : null;
+  const hidden = nets.filter(n=>!n.ssid).length;
+
+  const tiles = `
+    <div class="grid">
+      <div class="tile"><div class="lbl">networks</div><div class="v">${r.count}</div></div>
+      <div class="tile"><div class="lbl">bands</div><div class="v">${[...bands].join(' / ')||'—'}</div></div>
+      <div class="tile"><div class="lbl">strongest</div><div class="v">${strongest??'—'}<small> dBm</small></div></div>
+      <div class="tile"><div class="lbl">channels</div><div class="v">${Object.keys(chans).length}<small> in use</small></div></div>
+      <div class="tile"><div class="lbl">hidden ssid</div><div class="v">${hidden}</div></div>
+    </div>`;
+
+  const rows = nets.map((n,i)=>{
+    const pct = sigPct(n.rssi);
+    return `<div class="net">
+      <div class="rank">${String(i+1).padStart(2,'0')}</div>
+      <div>
+        <div class="ssid ${n.ssid?'':'hidden'}">${n.ssid?esc(n.ssid):'⟨hidden⟩'}</div>
+        <div class="bssid">${n.bssid}</div>
+      </div>
+      <div class="vendorcell"><div class="vendor">${esc(vendor(n.bssid))}</div>
+        <div class="meta"><span class="chip">CH ${n.channel}</span> ${band(n.channel)}</div></div>
+      <div class="metacell"><div class="meta"><span class="dbm">${n.rssi} dBm</span> · ≈${dist(n.rssi)} m</div>
+        <div class="bar"><i style="width:${pct}%"></i></div></div>
+    </div>`;
+  }).join('');
+
+  const chan = Object.entries(chans).sort((a,b)=>a[0]-b[0])
+    .map(([c,n])=>`<div class="c"><b>CH ${c}</b><span class="n">${n}×</span></div>`).join('');
+
+  const bssids = nets.map(n=>n.bssid).join('  ');
+  const hex = r.frame.map(b=>b.toString(16).padStart(2,'0')).join(' ');
+
+  out.innerHTML = `
+    <div class="status">✔ <span class="ok">DECODE OK</span> · WBCN v${r.version} · CRC ✓ ·
+      ${r.count} networks · payload ${r.frame.length} B · src <b>${esc(file.name)}</b></div>
+    ${tiles}
+    <div class="panel"><span class="lbl">channel occupancy</span><div class="chan">${chan||'—'}</div></div>
+    <div class="panel"><span class="lbl">networks · ranked by signal</span>${rows||'<div class="meta">none</div>'}</div>
+    <div class="panel geo"><span class="lbl">geolocation · wardriving (WiGLE)</span>
+      <div class="meta">Phase 2 — needs internet + a WiGLE API key (server-side). BSSIDs are ready to query:</div>
+      <div class="bssid-list">${bssids||'—'}</div>
+      <div style="margin-top:10px"><button disabled>◴ QUERY WIGLE — OFFLINE</button></div>
+    </div>
+    <div class="panel"><details><summary>raw frame · ${r.frame.length} bytes</summary>
+      <pre class="raw">${hex}</pre></details></div>`;
+  out.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+</script>
+</body>
+</html>
