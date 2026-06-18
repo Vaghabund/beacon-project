@@ -7,8 +7,11 @@
 - [ ] test and verify 25-30fps live view on hardware
 - [ ] verify OV5640 XCLK stays stable through light sleep cycles
 - [ ] verify fmt2rgb888 byte order matches Pixel {r,g,b} struct on target hardware
-- [ ] run test_data_roundtrip.py to confirm the data-layer format end-to-end
+- [x] run test_data_roundtrip.py to confirm the data-layer format end-to-end (PASS)
 - [ ] on-hardware: decode a real saved BMP with decode_beacon.py and confirm SSIDs match the scan
+- [ ] install QRCode library (ricmoo) before building — SHARE mode needs it
+- [ ] on-hardware: verify SHARE mode — QR scans, phone joins AP, captive portal opens gallery, BMP downloads and decodes
+- [ ] tune LONG_PRESS_MS if 800ms feels too short/long on the real button
 
 ## in progress
 
@@ -16,6 +19,7 @@
 
 ## done
 
+- [x] SHARE mode — long-press in result view opens captive-portal SoftAP + QR; phone scans to join and download saved BMPs (beacon_share.cpp; needs QRCode lib)
 - [x] recoverable data layer — LSB stego (SSID/BSSID/RSSI/channel), framed + CRC16, embedded after rings so the sort can't clobber it
 - [x] lossless BMP save to LittleFS (24-bit, bottom-up/BGR) — JPEG would destroy the LSB payload
 - [x] verified microSD pinout from schematic (IO38/39/40 + CS 41, shares LCD bus) — documented for the capacity upgrade
