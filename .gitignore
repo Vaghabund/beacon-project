@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 wifi_scan.json
 wifi_scan.csv
+_roundtrip.bmp

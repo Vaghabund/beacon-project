@@ -1,0 +1,17 @@
+# Custom partition table for the beacon device (16MB flash).
+# 3MB app + ~12.8MB LittleFS data partition → ~55 BMPs at 230KB each.
+#
+# Use it in the Arduino IDE:
+#   Tools > Partition Scheme > "Custom"   (then this file is picked up from the
+#   sketch folder automatically by arduino-esp32).
+# Or in PlatformIO:  board_build.partitions = partitions.csv
+#
+# The data partition MUST be labelled "spiffs" — that's the label LittleFS.begin()
+# mounts by default. NVS holds the persistent shot counter (Preferences).
+#
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0x9000,    0x5000,
+phy_init,   data, phy,      0xe000,    0x1000,
+factory,    app,  factory,  0x10000,   0x300000,
+spiffs,     data, spiffs,   0x310000,  0xCE0000,
+coredump,   data, coredump, 0xFF0000,  0x10000,
