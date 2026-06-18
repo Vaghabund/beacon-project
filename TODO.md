@@ -19,6 +19,7 @@
 
 ## done
 
+- [x] host preview — rings_preview.py compiles the real wifi_rings.c (via pip ziglang) and runs it on a photo; param flags + sort_dir sweep, PNG output. Faithful visual tuning with no hardware.
 - [x] SHARE mode — long-press in result view opens captive-portal SoftAP + QR; phone scans to join and download saved BMPs (beacon_share.cpp; needs QRCode lib)
 - [x] recoverable data layer — LSB stego (SSID/BSSID/RSSI/channel), framed + CRC16, embedded after rings so the sort can't clobber it
 - [x] lossless BMP save to LittleFS (24-bit, bottom-up/BGR) — JPEG would destroy the LSB payload

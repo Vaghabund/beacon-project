@@ -353,6 +353,32 @@ sort_dir        = 0    // 0=dark-inward  1=bright-inward  2=hue  3=sat
 disp_mode       = 0    // 0=radial (fastest, LUT-only)
 ```
 
+## previewing on a PC (no hardware)
+
+`wifi_rings.c` is pure C with no Arduino deps, so the **exact** device encoder
+runs on a laptop. `rings_preview.py` compiles it (via `python -m ziglang cc`)
+into a shared library and runs it over a photo with mock WiFi data — instant
+visual tuning, no flashing.
+
+```
+pip install ziglang pillow numpy
+python rings_preview.py                       # sample photo + mock_wifi_networks.json
+python rings_preview.py myphoto.jpg
+python rings_preview.py --ring-thickness 30 --max-displace 50
+python rings_preview.py --sweep               # 2x2 grid over all four sort_dir modes
+```
+
+Output PNGs land in `output/`. The flags mirror `RingConfig`, so whatever looks
+good here is what to set in `RING_CONFIG_DEFAULT`. This is a faithful test (same
+C); the older `wifi_rings_per_signal.html` is a separate JS sketch and has
+drifted from the current algorithm.
+
+**Emulating the whole device (display + UI flow):** load the sketch into
+[Wokwi](https://wokwi.com) (ESP32-S3 + ST7789 in the browser) to exercise the
+screen layout, button taps/holds, sleep states, and the QR render. Wokwi has no
+camera or real WiFi scan, so stub those to test the UI; use `rings_preview.py`
+for the actual rings look.
+
 ## files
 
 ```
@@ -366,6 +392,8 @@ beacon_share.cpp                captive-portal SoftAP + QR + HTTP gallery
 partitions.csv                  optional 16MB layout — ~12.8MB LittleFS (~55 images)
 decode_beacon.py                host decoder — recover the hidden scan from a BMP
 test_data_roundtrip.py          host self-test for the data layer (no hardware)
+rings_preview.py                host preview — run the real encoder on a photo, emit PNG
+rings_host.c                    C shim binding wifi_rings.c to rings_preview.py (ctypes)
 FIRST_FLASH.md                 first-flash checklist for this board
 wifi_rings_per_signal.html      browser reference — visualise the algorithm
 mock_wifi_networks.json         mock scan data for the browser reference

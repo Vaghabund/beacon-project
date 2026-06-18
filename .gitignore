@@ -3,3 +3,11 @@ __pycache__/
 wifi_scan.json
 wifi_scan.csv
 _roundtrip.bmp
+# host preview build artifacts + generated previews
+rings_host.dll
+rings_host.lib
+rings_host.pdb
+rings_host.exp
+librings_host.so
+*.o
+output/rings_preview*.png
