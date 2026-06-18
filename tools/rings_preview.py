@@ -26,9 +26,11 @@ import sys
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.abspath(__file__))   # tools/
+ROOT = os.path.dirname(HERE)                         # repo root
+FW = os.path.join(ROOT, "wifi_rings_esp32s3")        # Arduino sketch — firmware C lives here
 LIB = os.path.join(HERE, "rings_host.dll" if os.name == "nt" else "librings_host.so")
-SRCS = [os.path.join(HERE, "rings_host.c"), os.path.join(HERE, "wifi_rings.c")]
+SRCS = [os.path.join(HERE, "rings_host.c"), os.path.join(FW, "wifi_rings.c")]
 
 # RING_CONFIG_DEFAULT, mirrored from wifi_rings.h
 DEFAULTS = dict(inner_radius=18, ring_thickness=22, ring_gap=2,
@@ -40,7 +42,7 @@ def build_lib(force=False):
              and all(os.path.getmtime(LIB) >= os.path.getmtime(s) for s in SRCS))
     if fresh:
         return
-    cmd = [sys.executable, "-m", "ziglang", "cc", "-shared", "-O2", "-I", HERE,
+    cmd = [sys.executable, "-m", "ziglang", "cc", "-shared", "-O2", "-I", FW,
            *SRCS, "-o", LIB, "-lm"]
     print("building:", " ".join(cmd[2:]))
     subprocess.run(cmd, check=True)
@@ -95,10 +97,10 @@ def encode(lib, src_img, nets, cfg):
 def main():
     ap = argparse.ArgumentParser(description="Preview the wifi_rings encoder on a photo.")
     ap.add_argument("image", nargs="?",
-                    default=os.path.join(HERE, "sample-images", "mountains.jpg"))
+                    default=os.path.join(ROOT, "sample-images", "mountains.jpg"))
     ap.add_argument("--nets", default=os.path.join(HERE, "mock_wifi_networks.json"),
                     help="JSON list of networks (ssid/rssi/bssid/channel)")
-    ap.add_argument("--out", default=os.path.join(HERE, "output", "rings_preview.png"))
+    ap.add_argument("--out", default=os.path.join(ROOT, "output", "rings_preview.png"))
     for k, v in DEFAULTS.items():
         ap.add_argument("--" + k.replace("_", "-"), type=int, default=v)
     ap.add_argument("--sweep", action="store_true",

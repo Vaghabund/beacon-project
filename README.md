@@ -129,12 +129,12 @@ laptop:
 
 ```
 pip install pillow numpy
-python decode_beacon.py beacon_0001.bmp        # table
-python decode_beacon.py *.bmp --json           # machine-readable
+python tools/decode_beacon.py beacon_0001.bmp        # table
+python tools/decode_beacon.py *.bmp --json           # machine-readable
 ```
 
-`test_data_roundtrip.py` mirrors the firmware in Python and decodes its own output
-— run it to sanity-check the format end-to-end without hardware (it prints `PASS`).
+`tools/test_data_roundtrip.py` mirrors the firmware in Python and decodes its own
+output — run it to sanity-check the format end-to-end without hardware (prints `PASS`).
 
 ### share mode — scan to download (`beacon_share.cpp`)
 
@@ -220,19 +220,22 @@ Deep sleep always wakes into LIVE VIEW — result view is never the wake target.
 
 ## arduino IDE setup
 
+Open the **`wifi_rings_esp32s3/`** folder as the sketch (the `.ino` and all its
+`.c/.h/.cpp` live there together, as Arduino requires).
+
 ```
 Board:            ESP32S3 Dev Module
 PSRAM:            OPI PSRAM          ← critical, must match R8 chip
 Flash size:       16MB
-Partition scheme: Custom            ← uses partitions.csv (~12.8MB LittleFS, ~55 images)
+Partition scheme: Custom            ← uses wifi_rings_esp32s3/partitions.csv (~12.8MB LittleFS, ~55 images)
                   (or "Huge APP (3MB No OTA/1MB SPIFFS)" for ~4 images, no custom table)
 CPU frequency:    240MHz
 Arduino version:  ≥ 3.x (ESP32 core)
 ```
 
-Images are saved to a LittleFS partition. The bundled `partitions.csv` gives a
-~12.8MB data partition (~55 BMPs); select **Partition Scheme > Custom** to use it.
-With the default 1MB SPIFFS scheme you get ~4 images.
+Images are saved to a LittleFS partition. The `partitions.csv` in the sketch folder
+gives a ~12.8MB data partition (~55 BMPs); select **Partition Scheme > Custom** to
+use it. With the default 1MB SPIFFS scheme you get ~4 images.
 
 ## libraries
 
@@ -362,15 +365,15 @@ visual tuning, no flashing.
 
 ```
 pip install ziglang pillow numpy
-python rings_preview.py                       # sample photo + mock_wifi_networks.json
-python rings_preview.py myphoto.jpg
-python rings_preview.py --ring-thickness 30 --max-displace 50
-python rings_preview.py --sweep               # 2x2 grid over all four sort_dir modes
+python tools/rings_preview.py                       # sample photo + mock_wifi_networks.json
+python tools/rings_preview.py myphoto.jpg
+python tools/rings_preview.py --ring-thickness 30 --max-displace 50
+python tools/rings_preview.py --sweep               # 2x2 grid over all four sort_dir modes
 ```
 
 Output PNGs land in `output/`. The flags mirror `RingConfig`, so whatever looks
 good here is what to set in `RING_CONFIG_DEFAULT`. This is a faithful test — it's
-the same C the device runs.
+the same C the device runs (`rings_host.c` compiles `../wifi_rings_esp32s3/wifi_rings.c`).
 
 **Emulating the whole device (display + UI flow):** load the sketch into
 [Wokwi](https://wokwi.com) (ESP32-S3 + ST7789 in the browser) to exercise the
@@ -381,19 +384,20 @@ for the actual rings look.
 ## files
 
 ```
-wifi_rings.h                    types, RingConfig, API
-wifi_rings.c                    artistic encode (one-way), pure C, no Arduino deps
-wifi_data.h                     payload frame format + data-layer API
-wifi_data.c                     recoverable encode: framing, CRC16, LSB embed/extract
-wifi_rings_esp32s3.ino          full Arduino sketch (pipeline, LittleFS save, sleep)
-beacon_share.h                  SHARE-mode API (scan-to-download)
-beacon_share.cpp                captive-portal SoftAP + QR + HTTP gallery
-partitions.csv                  optional 16MB layout — ~12.8MB LittleFS (~55 images)
-decode_beacon.py                host decoder — recover the hidden scan from a BMP
-test_data_roundtrip.py          host self-test for the data layer (no hardware)
-rings_preview.py                host preview — run the real encoder on a photo, emit PNG
-rings_host.c                    C shim binding wifi_rings.c to rings_preview.py (ctypes)
-FIRST_FLASH.md                 first-flash checklist for this board
-mock_wifi_networks.json         mock scan data for rings_preview.py
-README.md                       this file
+wifi_rings_esp32s3/             Arduino sketch — open THIS folder in the IDE
+  wifi_rings_esp32s3.ino          pipeline, state machine, LittleFS save, sleep
+  wifi_rings.h / .c               artistic encode (one-way), pure C, no Arduino deps
+  wifi_data.h / .c                recoverable encode: framing, CRC16, LSB embed/extract
+  beacon_share.h / .cpp           SHARE mode: captive-portal SoftAP + QR + HTTP gallery
+  partitions.csv                  16MB layout — ~12.8MB LittleFS (~55 images)
+tools/                          host-side dev tools (run with python from repo root)
+  rings_preview.py                preview the real encoder on a photo, emit PNG
+  rings_host.c                    C shim binding wifi_rings.c into rings_preview.py
+  decode_beacon.py                recover the hidden scan from a saved BMP
+  test_data_roundtrip.py          data-layer self-test (no hardware)
+  mock_wifi_networks.json         mock scan data for rings_preview.py
+sample-images/                  default photo(s) for rings_preview.py
+output/                         generated previews + kept sample renders
+FIRST_FLASH.md                  first-flash checklist for this board
+README.md  TODO.md              docs
 ```
