@@ -53,6 +53,7 @@
 
 #include "wifi_rings.h"
 #include "wifi_data.h"
+#include "beacon_share.h"
 
 // fmt2rgb888 writes raw R,G,B bytes — Pixel must be exactly 3 bytes, no padding.
 // data_embed_lsb also relies on this: it treats the image as a flat byte array.
@@ -235,6 +236,23 @@ static bool poll_button() {
     if (!button_pressed()) return false;
     wait_release();
     return true;
+}
+
+// Distinguish a short tap from a long hold. Blocks for the duration of the
+// press, then returns once the button is released (or once the long-press
+// threshold is crossed). Call repeatedly in a loop.
+#define LONG_PRESS_MS  800
+enum class Press { NONE, SHORT, LONG };
+static Press poll_press() {
+    if (!button_pressed()) return Press::NONE;
+    delay(30);
+    if (!button_pressed()) return Press::NONE;   // debounce bounce/noise
+    unsigned long t0 = millis();
+    while (button_pressed()) {
+        if (millis() - t0 >= LONG_PRESS_MS) { wait_release(); return Press::LONG; }
+        delay(5);
+    }
+    return Press::SHORT;
 }
 
 // ─── camera init ──────────────────────────────────────────────────────────────
@@ -516,17 +534,22 @@ static bool run_pipeline() {
 // ─────────────────────────────────────────────────────────────────────────────
 //  RESULT VIEW
 //  Holds encoded image on screen.
-//  Button press → return to live view.
+//  Short press → return to live view.  Long press (≥800ms) → SHARE mode.
 //  10s idle → light sleep. 60s idle → deep sleep.
 // ─────────────────────────────────────────────────────────────────────────────
 static void run_result_view() {
-    Serial.println("result view");
+    Serial.println("result view (tap = live view, hold = share/QR)");
     unsigned long last_activity = millis();
 
     while (true) {
-        // ── button → back to live view ───────────────────────────────────────
-        if (poll_button()) {
-            return;
+        // ── button: tap → live view, hold → share mode ────────────────────────
+        Press p = poll_press();
+        if (p == Press::SHORT) {
+            return;                       // back to live view
+        }
+        if (p == Press::LONG) {
+            run_share_mode(tft, PIN_BUTTON);   // AP + QR + gallery; blocks until press
+            return;                       // exit share → live view
         }
 
         unsigned long idle = millis() - last_activity;

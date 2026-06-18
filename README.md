@@ -11,7 +11,13 @@ Press button → pipeline runs. 10s idle → light sleep. 60s idle → deep slee
 Progress bar advances across bottom of screen.
 
 **RESULT VIEW** — encoded image held on screen.
-Press button → back to live view. 10s idle → light sleep. 60s idle → deep sleep.
+Tap button → back to live view. **Hold button (≥0.8s) → SHARE mode.**
+10s idle → light sleep. 60s idle → deep sleep.
+
+**SHARE mode** — the device opens an open captive-portal Wi-Fi AP and shows a
+**Wi-Fi-join QR** on screen. Scan it with a phone → it joins the AP → the captive
+portal auto-opens a gallery of all saved images, tap one to download. Press the
+button to exit (Wi-Fi off, back to live view).
 
 Deep sleep always wakes into live view — no edge cases.
 
@@ -130,6 +136,31 @@ python decode_beacon.py *.bmp --json           # machine-readable
 `test_data_roundtrip.py` mirrors the firmware in Python and decodes its own output
 — run it to sanity-check the format end-to-end without hardware (it prints `PASS`).
 
+### share mode — scan to download (`beacon_share.cpp`)
+
+No card reader needed to get images off the device. In RESULT VIEW, **hold the
+button ≥0.8s** to enter SHARE mode:
+
+```
+hold button → SoftAP "beacon-XXXX" up + DNS captive portal + HTTP server
+            → display shows a WiFi-join QR
+phone scans QR → joins the open AP → captive portal pops the gallery
+              → tap an image → downloads the lossless BMP (LSB data intact)
+press button → AP down, WiFi off, back to live view
+```
+
+- The QR encodes a standard Wi-Fi-join string (`WIFI:T:nopass;S:beacon-XXXX;;`),
+  so one scan joins the network; the captive portal then opens `http://192.168.4.1`
+  automatically. The SSID + URL are also printed on screen as a manual fallback.
+- The AP is **open** (no password) — it's local and ephemeral, and open networks
+  pop the captive portal most reliably. Downloads are served as
+  `application/octet-stream` so phones save (not transcode) the file, keeping the
+  hidden LSB payload byte-exact.
+- Filenames are validated (`beacon_*.bmp`, no path traversal) before serving.
+
+Dependency: the **QRCode** library by Richard Moore (Arduino Library Manager →
+"QRCode"). `WiFi` / `WebServer` / `DNSServer` / `LittleFS` ship with arduino-esp32.
+
 ---
 
 ## workflow
@@ -158,13 +189,19 @@ python decode_beacon.py *.bmp --json           # machine-readable
       ▼                                                        │
 [rings_encode()]       read g_src → write g_dst, pure CPU      │
       ▼                                                        │
+[data_embed_lsb()]     hide scan in LSBs (after rings)         │
+      ▼                                                        │
+[save_bmp()]           lossless BMP → LittleFS                 │
+      ▼                                                        │
 [SPI blit]             ping-pong DMA, ~15ms                    │
       ▼                                                        │
 [RESULT VIEW]                                                  │
       │  image held on screen, progress bar full               │
+      │  tap button → live view ───────────────────────────────┤
+      │  hold button → SHARE mode (AP + QR + gallery) → live ───┤
       │  10s idle → light sleep (XCLK running)                 │
       │  60s idle → deep sleep                                 │
-      │  button press ─────────────────────────────────────────┘
+      │  tap (after wake) ─────────────────────────────────────┘
 ```
 
 Nothing in the pipeline runs simultaneously. No PSRAM bandwidth contention.
@@ -203,6 +240,8 @@ With the default 1MB SPIFFS scheme you get ~4 images.
 |---------|---------|-------|
 | Arduino_GFX_Library | latest | onboard display driver for this board |
 | esp32-camera | bundled with arduino-esp32 core | no install needed |
+| QRCode (ricmoo) | latest | SHARE-mode QR rendering — Library Manager: "QRCode" |
+| WiFi / WebServer / DNSServer / LittleFS | bundled with arduino-esp32 core | no install needed |
 
 ## built-in display mapping
 
@@ -322,6 +361,8 @@ wifi_rings.c                    artistic encode (one-way), pure C, no Arduino de
 wifi_data.h                     payload frame format + data-layer API
 wifi_data.c                     recoverable encode: framing, CRC16, LSB embed/extract
 wifi_rings_esp32s3.ino          full Arduino sketch (pipeline, LittleFS save, sleep)
+beacon_share.h                  SHARE-mode API (scan-to-download)
+beacon_share.cpp                captive-portal SoftAP + QR + HTTP gallery
 partitions.csv                  optional 16MB layout — ~12.8MB LittleFS (~55 images)
 decode_beacon.py                host decoder — recover the hidden scan from a BMP
 test_data_roundtrip.py          host self-test for the data layer (no hardware)
