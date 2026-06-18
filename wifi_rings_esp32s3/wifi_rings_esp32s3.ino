@@ -48,10 +48,15 @@
 #include <esp_sleep.h>
 #include <driver/gpio.h>
 #include <Arduino_GFX_Library.h>
+#include <LittleFS.h>
+#include <Preferences.h>
 
 #include "wifi_rings.h"
+#include "wifi_data.h"
+#include "beacon_share.h"
 
-// fmt2rgb888 writes raw R,G,B bytes — Pixel must be exactly 3 bytes, no padding
+// fmt2rgb888 writes raw R,G,B bytes — Pixel must be exactly 3 bytes, no padding.
+// data_embed_lsb also relies on this: it treats the image as a flat byte array.
 static_assert(sizeof(Pixel) == 3, "Pixel struct must be 3 bytes packed");
 
 // ─── timing ───────────────────────────────────────────────────────────────────
@@ -91,6 +96,21 @@ static_assert(sizeof(Pixel) == 3, "Pixel struct must be 3 bytes packed");
 #define LCD_BL         1
 #define LCD_ROTATION   1
 
+// ─── storage ───────────────────────────────────────────────────────────────────
+//  Encoded BMPs are saved to internal flash via LittleFS (see storage_init /
+//  save_bmp). No SPI sharing, no risk to the display.
+//
+//  FUTURE microSD UPGRADE (for capacity): the SD slot is SPI and SHARES the LCD
+//  bus — verified from the schematic:
+//    IO38 = LCD_MOSI / SD_MOSI   (shared)
+//    IO39 = LCD_SCLK / SD_SCLK   (shared)
+//    IO40 = SD_MISO              (shared MISO line; LCD is write-only)
+//    IO41 = SD_CS                (dedicated)
+//  Because it is a shared bus, the SD must mount on the SAME SPI instance
+//  Arduino_GFX drives (selected by its own CS) — NOT a second SPIClass on these
+//  pins, which would steal the routing and break the display. See README
+//  "microSD mapping" before enabling. Until then, storage stays on LittleFS.
+
 static constexpr uint16_t COLOR_BLACK = 0x0000;
 static constexpr uint16_t COLOR_WHITE = 0xFFFF;
 static constexpr uint16_t COLOR_RED = 0xF800;
@@ -125,13 +145,18 @@ int         g_n_nets = 0;
 // Encoder config
 RingConfig g_cfg = RING_CONFIG_DEFAULT;
 
+// ─── storage state ──────────────────────────────────────────────────────────────
+bool        g_fs_ok = false;            // set in setup(); false → save step skipped
+Preferences g_prefs;                    // persists the shot counter across reboots
+uint8_t     g_payload[WBCN_MAX_FRAME];  // framed scan data, embedded into LSBs
+
 // ─── state ────────────────────────────────────────────────────────────────────
 enum class AppState { LIVE_VIEW, PIPELINE, RESULT_VIEW };
 AppState g_state = AppState::LIVE_VIEW;
 
 // ─── progress bar ─────────────────────────────────────────────────────────────
-// 4px bar at bottom edge, 4 pipeline stages (scan, capture, encode, blit)
-#define PROGRESS_STAGES  4
+// 4px bar at bottom edge, 5 pipeline stages (capture, scan, encode, save, blit)
+#define PROGRESS_STAGES  5
 #define PROGRESS_Y       (IMG_H - 4)
 #define PROGRESS_H       4
 
@@ -213,6 +238,23 @@ static bool poll_button() {
     return true;
 }
 
+// Distinguish a short tap from a long hold. Blocks for the duration of the
+// press, then returns once the button is released (or once the long-press
+// threshold is crossed). Call repeatedly in a loop.
+#define LONG_PRESS_MS  800
+enum class Press { NONE, SHORT, LONG };
+static Press poll_press() {
+    if (!button_pressed()) return Press::NONE;
+    delay(30);
+    if (!button_pressed()) return Press::NONE;   // debounce bounce/noise
+    unsigned long t0 = millis();
+    while (button_pressed()) {
+        if (millis() - t0 >= LONG_PRESS_MS) { wait_release(); return Press::LONG; }
+        delay(5);
+    }
+    return Press::SHORT;
+}
+
 // ─── camera init ──────────────────────────────────────────────────────────────
 static bool camera_init() {
     camera_config_t cfg = {};
@@ -275,12 +317,97 @@ static void do_wifi_scan() {
         g_nets[g_n_nets].ssid[MAX_SSID_LEN - 1] = '\0';
         g_nets[g_n_nets].dbm     = (int8_t)WiFi.RSSI(i);
         g_nets[g_n_nets].channel = (uint8_t)WiFi.channel(i);
-        Serial.printf("  %s  %d dBm  ch%d\n",
-            g_nets[g_n_nets].ssid, g_nets[g_n_nets].dbm, g_nets[g_n_nets].channel);
+        const uint8_t* bssid = WiFi.BSSID(i);   // 6 bytes, valid for this index
+        if (bssid) memcpy(g_nets[g_n_nets].bssid, bssid, 6);
+        else       memset(g_nets[g_n_nets].bssid, 0, 6);
+        Serial.printf("  %s  %02X:%02X:%02X:%02X:%02X:%02X  %d dBm  ch%d\n",
+            g_nets[g_n_nets].ssid,
+            g_nets[g_n_nets].bssid[0], g_nets[g_n_nets].bssid[1],
+            g_nets[g_n_nets].bssid[2], g_nets[g_n_nets].bssid[3],
+            g_nets[g_n_nets].bssid[4], g_nets[g_n_nets].bssid[5],
+            g_nets[g_n_nets].dbm, g_nets[g_n_nets].channel);
         g_n_nets++;
     }
     rings_sort_networks(g_nets, g_n_nets);
     Serial.printf("found %d networks\n", g_n_nets);
+}
+
+// ─── storage: SD + persistent shot counter ─────────────────────────────────────
+
+static void storage_init() {
+    g_prefs.begin("beacon", false);     // RW namespace for the shot counter
+    // formatOnFail = true: first boot on a fresh partition gets formatted once.
+    if (LittleFS.begin(true)) {
+        g_fs_ok = true;
+        Serial.printf("LittleFS ready: %u KB used / %u KB total\n",
+                      (unsigned)(LittleFS.usedBytes() / 1024),
+                      (unsigned)(LittleFS.totalBytes() / 1024));
+    } else {
+        g_fs_ok = false;
+        Serial.println("LittleFS mount failed — saves skipped.");
+    }
+}
+
+// Monotonic shot index persisted in NVS — survives reboots and deep sleep.
+static uint32_t next_seq() {
+    uint32_t s = g_prefs.getUInt("seq", 0);
+    g_prefs.putUInt("seq", s + 1);
+    return s;
+}
+
+static inline void put_le16(uint8_t* p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)(v >> 8);
+}
+static inline void put_le32(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFF);        p[1] = (uint8_t)((v >> 8)  & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF); p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+// Write img as a 24-bit uncompressed BMP (lossless — preserves the LSB payload).
+// BMP is stored bottom-up and BGR; the host decoder reads it back top-down RGB,
+// so per-pixel channel values — and their LSBs — are preserved exactly.
+// On success fills out_path with the filename written. Returns false if no FS.
+static bool save_bmp(const Pixel* img, char* out_path, size_t path_len) {
+    if (!g_fs_ok) return false;
+
+    const uint32_t seq = next_seq();
+    snprintf(out_path, path_len, "/beacon_%04u.bmp", (unsigned)seq);
+
+    const int      row_raw    = IMG_W * 3;
+    const int      pad        = (4 - (row_raw & 3)) & 3;   // rows align to 4 bytes
+    const int      row_padded = row_raw + pad;
+    const uint32_t img_size   = (uint32_t)row_padded * IMG_H;
+
+    uint8_t hdr[54] = {0};
+    hdr[0] = 'B'; hdr[1] = 'M';
+    put_le32(&hdr[2],  54 + img_size);   // file size
+    put_le32(&hdr[10], 54);              // pixel data offset
+    put_le32(&hdr[14], 40);              // BITMAPINFOHEADER size
+    put_le32(&hdr[18], IMG_W);
+    put_le32(&hdr[22], IMG_H);           // positive height → bottom-up rows
+    put_le16(&hdr[26], 1);               // planes
+    put_le16(&hdr[28], 24);              // bits per pixel
+    put_le32(&hdr[34], img_size);
+    put_le32(&hdr[38], 2835);            // ~72 DPI, x
+    put_le32(&hdr[42], 2835);            // ~72 DPI, y
+
+    File f = LittleFS.open(out_path, "w");
+    if (!f) { Serial.printf("open %s failed\n", out_path); return false; }
+    f.write(hdr, sizeof(hdr));
+
+    uint8_t row[IMG_W * 3 + 4];
+    for (int i = row_raw; i < row_padded; i++) row[i] = 0;   // zero pad once
+    for (int y = IMG_H - 1; y >= 0; y--) {                   // bottom-up
+        const Pixel* s = &img[y * IMG_W];
+        for (int x = 0; x < IMG_W; x++) {
+            row[x * 3 + 0] = s[x].b;   // BMP byte order is B,G,R
+            row[x * 3 + 1] = s[x].g;
+            row[x * 3 + 2] = s[x].r;
+        }
+        f.write(row, row_padded);
+    }
+    f.close();
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -362,17 +489,40 @@ static bool run_pipeline() {
     delay(50);
     Serial.printf("[%lu ms] scan done\n", millis() - t0);
 
-    // ── 3. Encode rings ──────────────────────────────────────────────────────
+    // ── 3. Encode rings (artistic layer) + embed data layer ───────────────────
     progress_bar(3);
     if (g_n_nets == 0) {
         memcpy(g_dst, g_src, IMG_PIXELS * sizeof(Pixel));
     } else {
         rings_encode(g_src, g_dst, g_nets, g_n_nets, &g_cfg);
     }
-    Serial.printf("[%lu ms] encode done\n", millis() - t0);
 
-    // ── 4. Blit result ───────────────────────────────────────────────────────
+    // Embed the recoverable payload into the LSBs *after* rings_encode, so the
+    // pixel-sort can never overwrite it. Runs even for 0 networks (empty frame).
+    int plen = data_build_payload(g_nets, g_n_nets, g_payload, sizeof(g_payload));
+    if (plen > 0) {
+        if (data_embed_lsb(g_dst, IMG_PIXELS, g_payload, plen) < 0) {
+            Serial.println("payload too large to embed");
+        } else {
+            // On-device sanity check — read it straight back out of g_dst.
+            static uint8_t verify[WBCN_MAX_FRAME];
+            int vlen = data_extract_lsb(g_dst, IMG_PIXELS, verify, sizeof(verify));
+            Serial.printf("embed %d B, self-extract %s\n",
+                          plen, (vlen == plen) ? "OK" : "FAILED");
+        }
+    }
+    Serial.printf("[%lu ms] encode + embed done\n", millis() - t0);
+
+    // ── 4. Save lossless BMP (JPEG would destroy the LSB payload) ──────────────
     progress_bar(4);
+    char path[24];
+    if (save_bmp(g_dst, path, sizeof(path)))
+        Serial.printf("[%lu ms] saved %s\n", millis() - t0, path);
+    else
+        Serial.println("save skipped (no filesystem)");
+
+    // ── 5. Blit result ───────────────────────────────────────────────────────
+    progress_bar(5);
     blit_frame(g_dst);
     // Redraw full bar over image (blit overwrites it)
     progress_bar(PROGRESS_STAGES);
@@ -384,17 +534,22 @@ static bool run_pipeline() {
 // ─────────────────────────────────────────────────────────────────────────────
 //  RESULT VIEW
 //  Holds encoded image on screen.
-//  Button press → return to live view.
+//  Short press → return to live view.  Long press (≥800ms) → SHARE mode.
 //  10s idle → light sleep. 60s idle → deep sleep.
 // ─────────────────────────────────────────────────────────────────────────────
 static void run_result_view() {
-    Serial.println("result view");
+    Serial.println("result view (tap = live view, hold = share/QR)");
     unsigned long last_activity = millis();
 
     while (true) {
-        // ── button → back to live view ───────────────────────────────────────
-        if (poll_button()) {
-            return;
+        // ── button: tap → live view, hold → share mode ────────────────────────
+        Press p = poll_press();
+        if (p == Press::SHORT) {
+            return;                       // back to live view
+        }
+        if (p == Press::LONG) {
+            run_share_mode(tft, PIN_BUTTON);   // AP + QR + gallery; blocks until press
+            return;                       // exit share → live view
         }
 
         unsigned long idle = millis() - last_activity;
@@ -452,6 +607,11 @@ void setup() {
 
     // ── camera ───────────────────────────────────────────────────────────────
     if (!camera_init()) fatal("camera init failed");
+
+    // ── storage ──────────────────────────────────────────────────────────────
+    // Non-fatal: if the filesystem won't mount, the device still runs — it just
+    // skips the save step in the pipeline.
+    storage_init();
 
     // ── deep sleep wake config ────────────────────────────────────────────────
     // EXT0 wakes on GPIO0 LOW (button press). Used for deep sleep only.

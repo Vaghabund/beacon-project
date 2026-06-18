@@ -2,10 +2,16 @@
 
 ## pending
 
-- [ ] image saving — write encoded result to SD card or SPIFFS after pipeline
+- [ ] (capacity upgrade, optional) **shared-bus microSD** — SD shares the LCD SPI bus (IO38/39/40 + CS 41, verified). Drive LCD+SD from one SPIClass (LCD → Arduino_HWSPI), point save_bmp() at SD. Do this with hardware in hand to confirm live-view fps. LittleFS is the default until then.
+- [ ] select Partition Scheme "Custom" (uses partitions.csv) for ~55 images, or accept ~4 on the default 1MB SPIFFS
 - [ ] test and verify 25-30fps live view on hardware
 - [ ] verify OV5640 XCLK stays stable through light sleep cycles
 - [ ] verify fmt2rgb888 byte order matches Pixel {r,g,b} struct on target hardware
+- [x] run test_data_roundtrip.py to confirm the data-layer format end-to-end (PASS)
+- [ ] on-hardware: decode a real saved BMP with decode_beacon.py and confirm SSIDs match the scan
+- [ ] install QRCode library (ricmoo) before building — SHARE mode needs it
+- [ ] on-hardware: verify SHARE mode — QR scans, phone joins AP, captive portal opens gallery, BMP downloads and decodes
+- [ ] tune LONG_PRESS_MS if 800ms feels too short/long on the real button
 
 ## in progress
 
@@ -13,6 +19,14 @@
 
 ## done
 
+- [x] repo cleanup — removed old/drifted visualizers (wifi_rings_per_signal.html, wifi_visualizer.py, demo_multiple_networks.py) and stale fixture (mock-data/scan-data_1); rings_preview.py replaces them
+- [x] host preview — rings_preview.py compiles the real wifi_rings.c (via pip ziglang) and runs it on a photo; param flags + sort_dir sweep, PNG output. Faithful visual tuning with no hardware.
+- [x] SHARE mode — long-press in result view opens captive-portal SoftAP + QR; phone scans to join and download saved BMPs (beacon_share.cpp; needs QRCode lib)
+- [x] recoverable data layer — LSB stego (SSID/BSSID/RSSI/channel), framed + CRC16, embedded after rings so the sort can't clobber it
+- [x] lossless BMP save to LittleFS (24-bit, bottom-up/BGR) — JPEG would destroy the LSB payload
+- [x] verified microSD pinout from schematic (IO38/39/40 + CS 41, shares LCD bus) — documented for the capacity upgrade
+- [x] host decoder (decode_beacon.py) + format self-test (test_data_roundtrip.py)
+- [x] capture BSSID in the scan (the real per-AP signature)
 - [x] consolidate repo — remove Python scanner, deprecated HTML variants, CSV mock data
 - [x] landscape orientation — 320×240, no software rotation needed
 - [x] extern "C" linkage fix for wifi_rings.c ↔ .ino

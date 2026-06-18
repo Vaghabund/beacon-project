@@ -35,7 +35,8 @@ typedef struct {
 // One detected network
 typedef struct {
     char    ssid[MAX_SSID_LEN];
-    int8_t  dbm;      // e.g. -65
+    uint8_t bssid[6];   // MAC address — the unique per-AP signature
+    int8_t  dbm;        // e.g. -65
     uint8_t channel;
 } WifiNetwork;
 
