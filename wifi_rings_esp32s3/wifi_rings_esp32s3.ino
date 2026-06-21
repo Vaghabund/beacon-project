@@ -33,9 +33,11 @@
 //
 //  Arduino IDE settings:
 //    Board:            ESP32S3 Dev Module
-//    PSRAM:            OPI PSRAM   ← critical, must match R8 chip
+//    USB CDC On Boot:  Enabled     ← required for Serial over native USB
+//    PSRAM:            OPI PSRAM    ← critical, must match R8 chip
 //    Flash size:       16MB
-//    Partition scheme: Huge APP (3MB No OTA/1MB SPIFFS) or larger app partition
+//    Partition scheme: Custom      ← uses this folder's partitions.csv (~55 images)
+//                      (or "Huge APP (3MB No OTA/1MB SPIFFS)" for ~4 images)
 //    CPU frequency:    240MHz
 //    Core:             3.x (arduino-esp32)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,6 +52,7 @@
 #include <Arduino_GFX_Library.h>
 #include <LittleFS.h>
 #include <Preferences.h>
+#include <Wire.h>           // CST816 capacitive touch (used as a stand-in button)
 
 #include "wifi_rings.h"
 #include "wifi_data.h"
@@ -63,6 +66,13 @@ static_assert(sizeof(Pixel) == 3, "Pixel struct must be 3 bytes packed");
 #define IDLE_LIGHT_SLEEP_MS   10000UL   // 10s idle → light sleep
 #define IDLE_DEEP_SLEEP_MS    60000UL   // 60s idle → deep sleep
 #define CAPTURE_SETTLE_MS     100       // ms to let camera settle before fresh capture
+
+// ─── sleep enable (development) ───────────────────────────────────────────────
+// 0 = device stays fully awake in live/result view (no light or deep sleep).
+//     Deep sleep powers the board off — backlight off, USB CDC drops, and it
+//     only wakes via a full reboot, which makes development + re-flashing painful.
+// 1 = production power saving (the 10s light / 60s deep behaviour above).
+#define ENABLE_SLEEP  0
 
 // ─── pin assignments ──────────────────────────────────────────────────────────
 // Waveshare ESP32-S3-Touch-LCD-2 built-in display and camera mappings.
@@ -95,6 +105,16 @@ static_assert(sizeof(Pixel) == 3, "Pixel struct must be 3 bytes packed");
 #define LCD_CS         45
 #define LCD_BL         1
 #define LCD_ROTATION   1
+
+// ─── capacitive touch (CST816D, shared I2C with the IMU) ──────────────────────
+// From the board schematic: TP_SDA=IO48, TP_SCL=IO47, TP_INT=IO46. TP_RESET is
+// tied to the board reset net (no GPIO to drive). CST816D I2C address = 0x15.
+// Used here as a stand-in button: a finger tap counts as a button press, so the
+// device is usable before a physical button is soldered to GPIO0.
+#define TP_SDA         48
+#define TP_SCL         47
+#define TP_INT         46
+#define TP_ADDR        0x15
 
 // ─── storage ───────────────────────────────────────────────────────────────────
 //  Encoded BMPs are saved to internal flash via LittleFS (see storage_init /
@@ -154,6 +174,11 @@ uint8_t     g_payload[WBCN_MAX_FRAME];  // framed scan data, embedded into LSBs
 enum class AppState { LIVE_VIEW, PIPELINE, RESULT_VIEW };
 AppState g_state = AppState::LIVE_VIEW;
 
+// Defined here (not next to poll_press) so it precedes the auto-generated
+// function prototypes the Arduino build inserts at the top of the sketch —
+// a scoped enum used as a return type must be visible before those prototypes.
+enum class Press { NONE, SHORT, LONG };
+
 // ─── progress bar ─────────────────────────────────────────────────────────────
 // 4px bar at bottom edge, 5 pipeline stages (capture, scan, encode, save, blit)
 #define PROGRESS_STAGES  5
@@ -196,6 +221,7 @@ static void fatal(const char* msg) {
 }
 
 // ─── sleep helpers ────────────────────────────────────────────────────────────
+#if ENABLE_SLEEP
 
 // Light sleep: CPU pauses, PSRAM + camera XCLK stay powered.
 // Returns when GPIO0 falls (button press). Wake is ~2ms.
@@ -217,10 +243,48 @@ static void enter_deep_sleep() {
     // never returns
 }
 
+#endif  // ENABLE_SLEEP
+
+// ─── capacitive touch ─────────────────────────────────────────────────────────
+// Polls the CST816 over I2C; a finger on the panel reads as a button press.
+static bool g_touch_ok = false;
+
+// Touch runs on Wire (I2C port 0). The camera installs its own SCCB driver on
+// I2C port 1 (its default when pin_sccb_sda is a real pin), so port 0 is free.
+static void touch_init() {
+    Wire.begin(TP_SDA, TP_SCL, 400000);
+    pinMode(TP_INT, INPUT);
+    delay(5);
+    Wire.beginTransmission(TP_ADDR);
+    if (Wire.endTransmission() == 0) {
+        g_touch_ok = true;
+        // DisAutoSleep (reg 0xFE)=1 keeps the controller responsive to polling.
+        Wire.beginTransmission(TP_ADDR);
+        Wire.write(0xFE);
+        Wire.write(0x01);
+        Wire.endTransmission();
+        Serial.println("touch (CST816) ready");
+    } else {
+        Serial.println("touch not detected — GPIO0/BOOT still works as the button");
+    }
+}
+
+// True while a finger is on the panel. Reads the CST816 finger-count register
+// (0x02, low nibble); returns false on any I2C error so it degrades gracefully.
+static bool touch_pressed() {
+    if (!g_touch_ok) return false;
+    Wire.beginTransmission(TP_ADDR);
+    Wire.write(0x02);                        // FingerNum register
+    if (Wire.endTransmission(false) != 0) return false;   // repeated start
+    if (Wire.requestFrom(TP_ADDR, 1) != 1) return false;
+    return (Wire.read() & 0x0F) > 0;         // low nibble = touch-point count
+}
+
 // ─── button helpers ───────────────────────────────────────────────────────────
 
+// GPIO0 (BOOT button) OR a screen touch both count as "the button".
 static bool button_pressed() {
-    return digitalRead(PIN_BUTTON) == LOW;
+    return (digitalRead(PIN_BUTTON) == LOW) || touch_pressed();
 }
 
 // Block until button is fully released, then return.
@@ -242,8 +306,7 @@ static bool poll_button() {
 // press, then returns once the button is released (or once the long-press
 // threshold is crossed). Call repeatedly in a loop.
 #define LONG_PRESS_MS  800
-enum class Press { NONE, SHORT, LONG };
-static Press poll_press() {
+static Press poll_press() {   // Press enum is defined up in the state section
     if (!button_pressed()) return Press::NONE;
     delay(30);
     if (!button_pressed()) return Press::NONE;   // debounce bounce/noise
@@ -273,20 +336,27 @@ static bool camera_init() {
     cfg.ledc_timer   = LEDC_TIMER_0;
     cfg.ledc_channel = LEDC_CHANNEL_0;
 
-    // JPEG capture — not RGB direct (avoids PSRAM bandwidth corruption with WiFi)
-    cfg.pixel_format = PIXFORMAT_JPEG;
+    // RGB565 direct capture (not JPEG). The OV2640 on this board does not produce
+    // JPEG frames here — esp_camera_fb_get() times out — but RGB565 works. Capture
+    // always happens with WiFi off (live view, or the pipeline before the scan),
+    // so there is no PSRAM bandwidth contention to avoid.
+    cfg.pixel_format = PIXFORMAT_RGB565;
     cfg.frame_size   = FRAMESIZE_QVGA;  // 320×240 matches display
-    cfg.jpeg_quality = 63;              // lowest quality = smallest file = fastest live view
-                                        // pipeline bumps this to 12 before capture
-    cfg.fb_count     = 2;               // double-buffer: camera writes frame N+1 while we decode N
+    cfg.jpeg_quality = 0;               // unused in RGB565 mode
+    cfg.fb_count     = 2;               // double-buffer: camera fills one while we read the other
     cfg.fb_location  = CAMERA_FB_IN_PSRAM;
-    cfg.grab_mode    = CAMERA_GRAB_LATEST;  // always return newest frame, never stall
+    cfg.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;  // wait for a fresh frame to be ready
 
     esp_err_t err = esp_camera_init(&cfg);
     if (err != ESP_OK) {
         Serial.printf("Camera init failed: 0x%x\n", err);
         return false;
     }
+    // DIAGNOSTIC: report the detected sensor so we know SCCB really works.
+    sensor_t* s = esp_camera_sensor_get();
+    if (s) Serial.printf("camera sensor: PID=0x%02X VER=0x%02X MIDH=0x%02X MIDL=0x%02X\n",
+                         s->id.PID, s->id.VER, s->id.MIDH, s->id.MIDL);
+    else   Serial.println("camera init OK but sensor_get() == NULL");
     return true;
 }
 
@@ -301,9 +371,19 @@ static void blit_frame(const Pixel* src) {
 
 // ─── grab one JPEG frame, decode to dst, return false on failure ──────────────
 static bool grab_frame(Pixel* dst) {
+    static int dbg = 0;                       // DIAGNOSTIC: log first few grabs only
     camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb) return false;
-    bool ok = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, (uint8_t*)dst);
+    if (!fb) {
+        if (dbg++ < 8) Serial.println("grab: esp_camera_fb_get() == NULL (no frame arriving)");
+        return false;
+    }
+    bool ok = fmt2rgb888(fb->buf, fb->len, fb->format, (uint8_t*)dst);
+    if (dbg < 8) {
+        Serial.printf("grab: fb len=%u fmt=%d %ux%u decode=%s\n",
+                      (unsigned)fb->len, (int)fb->format,
+                      (unsigned)fb->width, (unsigned)fb->height, ok ? "OK" : "FAIL");
+        dbg++;
+    }
     esp_camera_fb_return(fb);
     return ok;
 }
@@ -418,7 +498,7 @@ static bool save_bmp(const Pixel* img, char* out_path, size_t path_len) {
 static void run_live_view() {
     Serial.println("live view");
     unsigned long last_activity = millis();
-    bool light_slept = false;
+    (void)last_activity;
 
     while (true) {
         // ── grab + blit frame ────────────────────────────────────────────────
@@ -431,6 +511,7 @@ static void run_live_view() {
             return;  // caller will run pipeline
         }
 
+#if ENABLE_SLEEP
         // ── idle timers ──────────────────────────────────────────────────────
         unsigned long idle = millis() - last_activity;
 
@@ -445,6 +526,7 @@ static void run_live_view() {
             wait_release();
             last_activity = millis();  // reset timer after wake
         }
+#endif
     }
 }
 
@@ -540,6 +622,7 @@ static bool run_pipeline() {
 static void run_result_view() {
     Serial.println("result view (tap = live view, hold = share/QR)");
     unsigned long last_activity = millis();
+    (void)last_activity;
 
     while (true) {
         // ── button: tap → live view, hold → share mode ────────────────────────
@@ -552,6 +635,7 @@ static void run_result_view() {
             return;                       // exit share → live view
         }
 
+#if ENABLE_SLEEP
         unsigned long idle = millis() - last_activity;
 
         if (idle >= IDLE_DEEP_SLEEP_MS) {
@@ -565,6 +649,7 @@ static void run_result_view() {
             // Button press in result view → go back to live view
             return;
         }
+#endif
 
         delay(10);
     }
@@ -589,6 +674,9 @@ void setup() {
 
     // ── button ───────────────────────────────────────────────────────────────
     pinMode(PIN_BUTTON, INPUT_PULLUP);
+
+    // ── touch (stand-in button until a GPIO0 button is soldered) ──────────────
+    touch_init();
 
     // ── PSRAM check ──────────────────────────────────────────────────────────
     Serial.printf("PSRAM: %d bytes total, %d bytes free\n",

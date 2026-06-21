@@ -1,9 +1,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 //  beacon_share.cpp — captive-portal "scan to download" mode
 //
-//  Dependency: the "QRCode" library by Richard Moore (ricmoo) — install via the
-//  Arduino Library Manager ("QRCode"). WiFi / WebServer / DNSServer / LittleFS
-//  are all bundled with arduino-esp32 (no install needed).
+//  No external libraries needed: the QR encoder is the ESP-IDF "qrcode"
+//  component bundled with arduino-esp32 (<qrcode.h> → esp_qrcode_*). WiFi /
+//  WebServer / DNSServer / LittleFS ship with the core too.
+//
+//  Note: do NOT add Richard Moore's "QRCode" Library-Manager library — its
+//  header is also named qrcode.h and collides with this bundled one.
 // ─────────────────────────────────────────────────────────────────────────────
 #include <Arduino.h>
 #include <WiFi.h>
@@ -11,7 +14,7 @@
 #include <DNSServer.h>
 #include <LittleFS.h>
 #include <Arduino_GFX_Library.h>
-#include <qrcode.h>
+#include <qrcode.h>   // ESP-IDF bundled QR encoder (esp_qrcode_*)
 
 #include "beacon_share.h"
 #include "wifi_rings.h"   // IMG_W, IMG_H
@@ -85,26 +88,49 @@ static void handle_portal() {
 }
 
 // ─── draw the WiFi-join QR + instructions ──────────────────────────────────────
-static void draw_qr(Arduino_GFX* gfx, const char* text, const char* ssid) {
-    QRCode qr;
-    uint8_t buf[256];                       // ample for version 4 (~137 bytes)
-    qrcode_initText(&qr, buf, 4, ECC_LOW, text);
+// The ESP-IDF encoder is callback-based: esp_qrcode_generate() encodes the text
+// then invokes display_func with a handle to read modules from. Its signature
+// carries no user pointer, so the target display and the rendered size are
+// passed through file-scope statics.
+static Arduino_GFX* s_qr_gfx = nullptr;
+static int          s_qr_qpx = 0;       // rendered QR side in px, for text layout
+static const int    QR_SCALE = 5;
+static const int    QR_OY    = 14;      // top margin of the QR block
 
-    const int modules = qr.size;            // 33 for version 4
-    const int scale   = 5;
-    const int qpx     = modules * scale;    // 165
-    const int qz      = scale * 2;          // quiet zone
+static void qr_render_cb(esp_qrcode_handle_t qr) {
+    const int modules = esp_qrcode_get_size(qr);
+    const int qpx     = modules * QR_SCALE;
+    const int qz      = QR_SCALE * 2;            // quiet zone
     const int ox      = (IMG_W - qpx) / 2;
-    const int oy      = 14;
+    s_qr_qpx = qpx;
 
-    gfx->fillScreen(S_BLACK);
-    gfx->fillRect(ox - qz, oy - qz, qpx + qz * 2, qpx + qz * 2, S_WHITE);
+    s_qr_gfx->fillScreen(S_BLACK);
+    s_qr_gfx->fillRect(ox - qz, QR_OY - qz, qpx + qz * 2, qpx + qz * 2, S_WHITE);
     for (int y = 0; y < modules; y++)
         for (int x = 0; x < modules; x++)
-            if (qrcode_getModule(&qr, x, y))
-                gfx->fillRect(ox + x * scale, oy + y * scale, scale, scale, S_BLACK);
+            if (esp_qrcode_get_module(qr, x, y))
+                s_qr_gfx->fillRect(ox + x * QR_SCALE, QR_OY + y * QR_SCALE,
+                                   QR_SCALE, QR_SCALE, S_BLACK);
+}
 
-    const int ty = oy + qpx + qz + 6;
+static void draw_qr(Arduino_GFX* gfx, const char* text, const char* ssid) {
+    s_qr_gfx = gfx;
+    s_qr_qpx = 0;
+
+    esp_qrcode_config_t cfg = ESP_QRCODE_CONFIG_DEFAULT();
+    cfg.display_func       = qr_render_cb;
+    cfg.max_qrcode_version = 4;                  // WiFi-join string fits well under v4
+    cfg.qrcode_ecc_level   = ESP_QRCODE_ECC_LOW;
+    if (esp_qrcode_generate(&cfg, text) != ESP_OK || s_qr_qpx == 0) {
+        gfx->fillScreen(S_BLACK);
+        gfx->setTextColor(S_WHITE, S_BLACK);
+        gfx->setCursor(6, 20);
+        gfx->print("QR encode failed");
+        return;
+    }
+
+    const int qz = QR_SCALE * 2;
+    const int ty = QR_OY + s_qr_qpx + qz + 6;
     gfx->setTextColor(S_WHITE, S_BLACK);
     gfx->setTextSize(1);
     gfx->setCursor(6, ty);      gfx->print("Scan to join WiFi:");
