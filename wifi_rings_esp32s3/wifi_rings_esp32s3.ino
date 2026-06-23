@@ -117,8 +117,8 @@ static_assert(sizeof(Pixel) == 3, "Pixel struct must be 3 bytes packed");
 #define TP_ADDR        0x15
 
 // ─── storage ───────────────────────────────────────────────────────────────────
-//  Encoded BMPs are saved to internal flash via LittleFS (see storage_init /
-//  save_bmp). No SPI sharing, no risk to the display.
+//  Encoded images are saved to internal flash via LittleFS as lossless PNG
+//  (see storage_init / save_png). No SPI sharing, no risk to the display.
 //
 //  FUTURE microSD UPGRADE (for capacity): the SD slot is SPI and SHARES the LCD
 //  bus — verified from the schematic:
@@ -435,58 +435,96 @@ static uint32_t next_seq() {
     return s;
 }
 
-static inline void put_le16(uint8_t* p, uint16_t v) {
-    p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)(v >> 8);
-}
-static inline void put_le32(uint8_t* p, uint32_t v) {
-    p[0] = (uint8_t)(v & 0xFF);        p[1] = (uint8_t)((v >> 8)  & 0xFF);
-    p[2] = (uint8_t)((v >> 16) & 0xFF); p[3] = (uint8_t)((v >> 24) & 0xFF);
+static inline void put_be32(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
 }
 
-// Write img as a 24-bit uncompressed BMP (lossless — preserves the LSB payload).
-// BMP is stored bottom-up and BGR; the host decoder reads it back top-down RGB,
-// so per-pixel channel values — and their LSBs — are preserved exactly.
-// On success fills out_path with the filename written. Returns false if no FS.
-static bool save_bmp(const Pixel* img, char* out_path, size_t path_len) {
+// CRC-32 (PNG chunks) and Adler-32 (zlib) — bitwise, no tables, no deps.
+static uint32_t crc32_update(uint32_t crc, const uint8_t* d, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        crc ^= d[i];
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320u : (crc >> 1);
+    }
+    return crc;
+}
+static uint32_t adler32_update(uint32_t adler, const uint8_t* d, size_t n) {
+    uint32_t a = adler & 0xFFFF, b = (adler >> 16) & 0xFFFF;
+    for (size_t i = 0; i < n; i++) { a = (a + d[i]) % 65521u; b = (b + a) % 65521u; }
+    return (b << 16) | a;
+}
+static void png_chunk(File& f, const char* type, const uint8_t* data, uint32_t len) {
+    uint8_t lt[4]; put_be32(lt, len); f.write(lt, 4);
+    uint32_t crc = 0xFFFFFFFFu;
+    f.write((const uint8_t*)type, 4); crc = crc32_update(crc, (const uint8_t*)type, 4);
+    if (len) { f.write(data, len); crc = crc32_update(crc, data, len); }
+    uint8_t cb[4]; put_be32(cb, crc ^ 0xFFFFFFFFu); f.write(cb, 4);
+}
+
+// Write img as a lossless 24-bit PNG (RGB, top-down) — preserves the LSB payload.
+// Uses zlib "stored" (uncompressed) deflate blocks, so a valid PNG is produced
+// with NO compression library. The host decoders read the pixel LSBs byte-exact.
+// On success fills out_path. Returns false if no FS / no PSRAM.
+static bool save_png(const Pixel* img, char* out_path, size_t path_len) {
     if (!g_fs_ok) return false;
 
     const uint32_t seq = next_seq();
-    snprintf(out_path, path_len, "/beacon_%04u.bmp", (unsigned)seq);
+    snprintf(out_path, path_len, "/beacon_%04u.png", (unsigned)seq);
 
-    const int      row_raw    = IMG_W * 3;
-    const int      pad        = (4 - (row_raw & 3)) & 3;   // rows align to 4 bytes
-    const int      row_padded = row_raw + pad;
-    const uint32_t img_size   = (uint32_t)row_padded * IMG_H;
+    const uint32_t rowlen = 1u + (uint32_t)IMG_W * 3;       // filter byte + RGB
+    const uint32_t rawlen = rowlen * (uint32_t)IMG_H;
 
-    uint8_t hdr[54] = {0};
-    hdr[0] = 'B'; hdr[1] = 'M';
-    put_le32(&hdr[2],  54 + img_size);   // file size
-    put_le32(&hdr[10], 54);              // pixel data offset
-    put_le32(&hdr[14], 40);              // BITMAPINFOHEADER size
-    put_le32(&hdr[18], IMG_W);
-    put_le32(&hdr[22], IMG_H);           // positive height → bottom-up rows
-    put_le16(&hdr[26], 1);               // planes
-    put_le16(&hdr[28], 24);              // bits per pixel
-    put_le32(&hdr[34], img_size);
-    put_le32(&hdr[38], 2835);            // ~72 DPI, x
-    put_le32(&hdr[42], 2835);            // ~72 DPI, y
+    uint8_t* raw = (uint8_t*)heap_caps_malloc(rawlen, MALLOC_CAP_SPIRAM);
+    if (!raw) { Serial.println("png: PSRAM alloc failed"); return false; }
+
+    uint32_t k = 0;                                         // filtered scanlines, top-down
+    for (int y = 0; y < IMG_H; y++) {
+        raw[k++] = 0;                                       // filter: none
+        const Pixel* s = &img[y * IMG_W];
+        for (int x = 0; x < IMG_W; x++) { raw[k++] = s[x].r; raw[k++] = s[x].g; raw[k++] = s[x].b; }
+    }
 
     File f = LittleFS.open(out_path, "w");
-    if (!f) { Serial.printf("open %s failed\n", out_path); return false; }
-    f.write(hdr, sizeof(hdr));
+    if (!f) { heap_caps_free(raw); Serial.printf("open %s failed\n", out_path); return false; }
 
-    uint8_t row[IMG_W * 3 + 4];
-    for (int i = row_raw; i < row_padded; i++) row[i] = 0;   // zero pad once
-    for (int y = IMG_H - 1; y >= 0; y--) {                   // bottom-up
-        const Pixel* s = &img[y * IMG_W];
-        for (int x = 0; x < IMG_W; x++) {
-            row[x * 3 + 0] = s[x].b;   // BMP byte order is B,G,R
-            row[x * 3 + 1] = s[x].g;
-            row[x * 3 + 2] = s[x].r;
-        }
-        f.write(row, row_padded);
+    static const uint8_t sig[8] = {137,80,78,71,13,10,26,10};
+    f.write(sig, 8);
+
+    uint8_t ihdr[13];
+    put_be32(ihdr,     (uint32_t)IMG_W);
+    put_be32(ihdr + 4, (uint32_t)IMG_H);
+    ihdr[8]=8; ihdr[9]=2; ihdr[10]=0; ihdr[11]=0; ihdr[12]=0;   // 8-bit, RGB, no interlace
+    png_chunk(f, "IHDR", ihdr, 13);
+
+    // IDAT = zlib header (0x78 0x01) + stored deflate blocks + adler32 trailer
+    const uint32_t nblocks = (rawlen + 65534u) / 65535u;
+    const uint32_t idatlen = 2u + nblocks * 5u + rawlen + 4u;
+    uint8_t lt[4]; put_be32(lt, idatlen); f.write(lt, 4);
+    uint32_t crc = 0xFFFFFFFFu;
+    const uint8_t typ[4] = {'I','D','A','T'};
+    f.write(typ, 4); crc = crc32_update(crc, typ, 4);
+    const uint8_t zh[2] = {0x78, 0x01}; f.write(zh, 2); crc = crc32_update(crc, zh, 2);
+
+    uint32_t adler = 1u, pos = 0;
+    while (pos < rawlen) {
+        uint32_t blk = rawlen - pos; if (blk > 65535u) blk = 65535u;
+        const uint16_t L = (uint16_t)blk, N = (uint16_t)~L;
+        uint8_t bh[5] = { (uint8_t)((pos + blk >= rawlen) ? 1 : 0),  // BFINAL on last, BTYPE=stored
+                          (uint8_t)(L & 0xFF), (uint8_t)(L >> 8),
+                          (uint8_t)(N & 0xFF), (uint8_t)(N >> 8) };
+        f.write(bh, 5);          crc = crc32_update(crc, bh, 5);
+        f.write(raw + pos, blk); crc = crc32_update(crc, raw + pos, blk);
+        adler = adler32_update(adler, raw + pos, blk);
+        pos += blk;
     }
+    uint8_t ad[4]; put_be32(ad, adler); f.write(ad, 4); crc = crc32_update(crc, ad, 4);
+    uint8_t cb[4]; put_be32(cb, crc ^ 0xFFFFFFFFu); f.write(cb, 4);   // IDAT CRC
+
+    png_chunk(f, "IEND", nullptr, 0);
+
     f.close();
+    heap_caps_free(raw);
     return true;
 }
 
@@ -595,10 +633,10 @@ static bool run_pipeline() {
     }
     Serial.printf("[%lu ms] encode + embed done\n", millis() - t0);
 
-    // ── 4. Save lossless BMP (JPEG would destroy the LSB payload) ──────────────
+    // ── 4. Save lossless PNG (JPEG would destroy the LSB payload) ──────────────
     progress_bar(4);
     char path[24];
-    if (save_bmp(g_dst, path, sizeof(path)))
+    if (save_png(g_dst, path, sizeof(path)))
         Serial.printf("[%lu ms] saved %s\n", millis() - t0, path);
     else
         Serial.println("save skipped (no filesystem)");

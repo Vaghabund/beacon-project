@@ -27,9 +27,9 @@ static DNSServer       s_dns;
 static const uint16_t  DNS_PORT = 53;
 static const IPAddress s_ap_ip(192, 168, 4, 1);
 
-// ─── filename safety — only "beacon_*.bmp", no path traversal ──────────────────
+// ─── filename safety — only "beacon_*.png", no path traversal ──────────────────
 static bool safe_name(const String& f) {
-    if (!f.startsWith("beacon_") || !f.endsWith(".bmp")) return false;
+    if (!f.startsWith("beacon_") || !f.endsWith(".png")) return false;
     if (f.indexOf('/') >= 0 || f.indexOf('\\') >= 0 || f.indexOf("..") >= 0) return false;
     return true;
 }
@@ -57,7 +57,7 @@ static void handle_root() {
     if (root) {
         for (File f = root.openNextFile(); f; f = root.openNextFile()) {
             String base = basename_of(String(f.name()));
-            if (base.startsWith("beacon_") && base.endsWith(".bmp")) {
+            if (base.startsWith("beacon_") && base.endsWith(".png")) {
                 s_http.sendContent("<a href='/dl?f=" + base + "'>" + base +
                                    " &middot; " + String((unsigned)(f.size() / 1024)) +
                                    " KB</a>");

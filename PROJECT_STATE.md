@@ -6,7 +6,7 @@ _Branch: `fix/laptop-bringup-touch-camera`._
 ## TL;DR
 
 The firmware builds, flashes, and runs on the Waveshare ESP32-S3-Touch-LCD-2.
-Live camera, touch-as-button, the capture pipeline, and lossless BMP save all
+Live camera, touch-as-button, the capture pipeline, and lossless **PNG** save all
 work. The camera image needs color/orientation tuning, and a few cleanups
 remain before this should merge to `main`.
 
@@ -36,7 +36,7 @@ remain before this should merge to `main`.
   stays connected — makes re-flashing reliable. Set to `1` for production power
   saving. The deep-sleep behaviour caused recurring trouble; keep it off in dev.
 - **Camera capture** (RGB565) + full pipeline: WiFi scan → rings encode → LSB
-  data embed → lossless BMP save.
+  data embed → lossless PNG save.
 
 ## Known issues / TODO (next session)
 
@@ -63,16 +63,19 @@ Two different formats, do not conflate them:
   this session, because the OV2640 on this board produced **no JPEG frames**
   (`esp_camera_fb_get()` timed out / returned NULL). RGB565 bypasses the
   sensor's JPEG engine. This is the live source only.
-- **Save format MUST stay lossless** (BMP today; PNG is the same intent). The
-  recoverable WiFi scan is hidden in the **pixel LSBs** (`wifi_data.c`). JPEG —
-  or any lossy re-encode — destroys those bits and the entire payload. **Never
-  save or re-export the result as JPEG.** See README → "two layers: artwork +
-  recoverable data".
+- **Save format = lossless PNG** (`save_png()` in the `.ino`). The recoverable
+  WiFi scan is hidden in the **pixel LSBs** (`wifi_data.c`). JPEG — or any lossy
+  re-encode — destroys those bits and the entire payload. **Never save or
+  re-export the result as JPEG.** See README → "two layers: artwork + recoverable
+  data".
+- The PNG writer uses zlib **"stored" (uncompressed) deflate blocks**, so it
+  needs **no compression library** — keeps the pinned toolchain untouched. Files
+  are roughly BMP-sized; swap in miniz/PNGenc later if you want real compression.
 
 The RGB565 capture change does **not** threaten the data layer: the LSB embed
-runs after `rings_encode()` and the output is written as a lossless 24-bit BMP.
-If formats are revisited, the one hard rule is: **the saved image stays
-lossless**.
+runs after `rings_encode()` and the output is written as a lossless PNG. The web
+decoder (`web/decode.js`) and `tools/decode_beacon.py` both read PNG (and BMP).
+The one hard rule, if formats are revisited: **the saved image stays lossless**.
 
 ## Hardware reference (Waveshare ESP32-S3-Touch-LCD-2)
 
