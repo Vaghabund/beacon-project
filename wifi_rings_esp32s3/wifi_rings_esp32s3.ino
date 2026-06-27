@@ -79,20 +79,24 @@ static_assert(sizeof(Pixel) == 3, "Pixel struct must be 3 bytes packed");
 
 #define PIN_BUTTON      0    // BOOT button = GPIO0, active LOW
 
-// Camera mapping from Waveshare's Arduino examples
+// Camera mapping — Waveshare ESP32-S3-Touch-LCD-2 schematic (see README
+// "camera mapping"). The data lines map to the OV2640 DVP bus as Y2..Y9, where
+// Y2 = D0 (LSB) and Y9 = D7 (MSB). Getting D0..D7 in the wrong order keeps the
+// timing/geometry perfect (that's VSYNC/HREF/PCLK) but scrambles every colour —
+// a bit-permutation that preserves brightness. That was the original bug.
 #define CAM_PWDN       17
 #define CAM_RESET      -1
 #define CAM_XCLK       8
 #define CAM_SIOD       21
 #define CAM_SIOC       16
-#define CAM_D7         10
-#define CAM_D6         14
-#define CAM_D5         11
-#define CAM_D4         15
-#define CAM_D3         13
-#define CAM_D2         12
-#define CAM_D1         7
-#define CAM_D0         2
+#define CAM_D7          2   // Y9 (MSB)
+#define CAM_D6          7   // Y8
+#define CAM_D5         10   // Y7
+#define CAM_D4         14   // Y6
+#define CAM_D3         11   // Y5
+#define CAM_D2         15   // Y4
+#define CAM_D1         13   // Y3
+#define CAM_D0         12   // Y2 (LSB)
 #define CAM_VSYNC      6
 #define CAM_HREF       4
 #define CAM_PCLK       9
@@ -357,6 +361,21 @@ static bool camera_init() {
     if (s) Serial.printf("camera sensor: PID=0x%02X VER=0x%02X MIDH=0x%02X MIDL=0x%02X\n",
                          s->id.PID, s->id.VER, s->id.MIDH, s->id.MIDL);
     else   Serial.println("camera init OK but sensor_get() == NULL");
+
+    // Sensor tuning. The OV2640 boots uncalibrated: no white balance, no auto
+    // exposure → green-starved, oversaturated, posterised colour. These six
+    // calls (matching the old working firmware) turn on AWB + auto-exposure and
+    // tame saturation, which is what actually fixes the colour — the RGB565
+    // decode was already correct.
+    if (s) {
+        s->set_brightness(s,     1);
+        s->set_contrast(s,       0);
+        s->set_saturation(s,     1);
+        s->set_whitebal(s,       1);   // white balance on
+        s->set_awb_gain(s,       1);   // auto white-balance gain on
+        s->set_exposure_ctrl(s,  1);   // auto exposure on
+        s->set_gain_ctrl(s,      1);   // auto gain on
+    }
     return true;
 }
 
@@ -385,12 +404,32 @@ static bool grab_frame(Pixel* dst) {
         dbg++;
     }
     esp_camera_fb_return(fb);
+
+    // fmt2rgb888() emits RGB565 as B,G,R bytes (it targets BMP, which is BGR).
+    // Our pipeline treats g_src as true RGB888 (Pixel{r,g,b}), so swap R<->B
+    // back to RGB here — otherwise warm scenes render blue/purple.
+    if (ok) {
+        uint8_t* p = (uint8_t*)dst;
+        for (int i = 0; i < IMG_PIXELS; i++, p += 3) {
+            uint8_t t = p[0]; p[0] = p[2]; p[2] = t;
+        }
+    }
     return ok;
 }
 
 // ─── wifi scan ────────────────────────────────────────────────────────────────
 static void do_wifi_scan() {
+    // The first scan after a cold radio start often returns a negative error
+    // (WIFI_SCAN_FAILED = -2) or 0 — that was the "failed first scan". Retry a
+    // few times, clearing stale scan state between attempts, until it succeeds.
     int found = WiFi.scanNetworks(false, true);
+    for (int attempt = 0; found <= 0 && attempt < 4; attempt++) {
+        Serial.printf("scan attempt %d returned %d — retrying\n", attempt + 1, found);
+        WiFi.scanDelete();
+        delay(200);
+        found = WiFi.scanNetworks(false, true);
+    }
+    if (found < 0) found = 0;
     g_n_nets = 0;
     for (int i = 0; i < found && g_n_nets < MAX_NETWORKS; i++) {
         strncpy(g_nets[g_n_nets].ssid, WiFi.SSID(i).c_str(), MAX_SSID_LEN - 1);
@@ -605,7 +644,11 @@ static bool run_pipeline() {
     WiFi.disconnect();
     do_wifi_scan();
     WiFi.scanDelete();
-    esp_wifi_stop();
+    // Tear down through the Arduino WiFi state machine (NOT raw esp_wifi_stop):
+    // esp_wifi_stop() stopped the radio behind the Arduino WiFi class's back, so
+    // the next run's WiFi.mode(STA) thought it was already started and never
+    // restarted it — every scan after the first came back empty (no rings).
+    WiFi.mode(WIFI_OFF);
     delay(50);
     Serial.printf("[%lu ms] scan done\n", millis() - t0);
 

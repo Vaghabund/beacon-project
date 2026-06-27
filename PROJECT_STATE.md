@@ -6,9 +6,9 @@ _Branch: `fix/laptop-bringup-touch-camera`._
 ## TL;DR
 
 The firmware builds, flashes, and runs on the Waveshare ESP32-S3-Touch-LCD-2.
-Live camera, touch-as-button, the capture pipeline, and lossless **PNG** save all
-work. The camera image needs color/orientation tuning, and a few cleanups
-remain before this should merge to `main`.
+Live camera (correct colour), touch-as-button, the capture pipeline, repeatable
+WiFi scans, and lossless **PNG** save all work. Camera colour, the failed
+first-tap, and the empty-rescan bugs are fixed (see below).
 
 ## Toolchain (what actually builds it)
 
@@ -35,23 +35,41 @@ remain before this should merge to `main`.
 - **No-sleep dev mode** (`ENABLE_SLEEP 0`): stays awake, backlight on, USB CDC
   stays connected — makes re-flashing reliable. Set to `1` for production power
   saving. The deep-sleep behaviour caused recurring trouble; keep it off in dev.
-- **Camera capture** (RGB565) + full pipeline: WiFi scan → rings encode → LSB
-  data embed → lossless PNG save.
+- **Camera capture** (RGB565, correct colour) + full pipeline: WiFi scan →
+  rings encode → LSB data embed → lossless PNG save.
+
+## Fixed this session ✅
+
+- **Camera colour** — the root cause was the `CAM_D0..D7` data-line `#define`s
+  being assigned to the wrong GPIOs (a scrambled copy of the Waveshare schematic
+  in README "camera mapping"). Every timing/control pin was right, so geometry +
+  brightness were perfect but colour was a bit-permutation (looked like a byte
+  order / white-balance problem — it wasn't). Diagnosed with the OV2640 internal
+  colour-bar: crisp bars + scrambled colour + white-stays-white = data-line
+  permutation. Fixed the eight defines to match the schematic. Also added the
+  sensor tuning (whitebal/awb_gain/exposure/gain) and the fmt2rgb888 B,G,R→R,G,B
+  swap.
+- **Failed first tap** — a stray debug raw-framebuffer dump (extra `fb_get` +
+  150 KB mid-pipeline flash write) was stalling the first capture; removed. Also
+  `do_wifi_scan()` now retries the cold-radio first scan (was returning -2/0).
+- **Empty rescans (rings only on the first capture)** — the pipeline used the
+  raw `esp_wifi_stop()` behind the Arduino WiFi class's back, so the next run's
+  `WiFi.mode(STA)` never restarted the radio. Now tears down with
+  `WiFi.mode(WIFI_OFF)` so every capture rescans.
 
 ## Known issues / TODO (next session)
 
-- **Camera image looks off** (color/orientation). Likely RGB565 byte order in
-  the blit path or missing sensor tuning (the old working `camera.c` set
-  brightness/contrast/saturation/whitebal/awb_gain/exposure_ctrl). Tune next.
-- **Diagnostics still in the code** — `camera sensor: PID=...` in `camera_init()`
-  and the throttled `grab: ...` lines in `grab_frame()`. Remove once camera is
-  fully verified.
 - **Touch can't exit SHARE mode.** `beacon_share.cpp` polls GPIO0 directly (it's
   a separate translation unit and can't see the touch helper). For now use
   **short taps**; a long-hold enters the QR screen and you'd need GPIO0 to leave.
   Fix: expose the touch check to share mode.
 - The onboard **BOOT button (GPIO0) did not respond** when pressed by hand —
   worth checking; touch is the working input for now.
+- **Minor diagnostics remain** — `camera sensor: PID=...` in `camera_init()` and
+  the throttled `grab: ...` lines in `grab_frame()` (harmless, first 8 grabs).
+- **Ring look** — the artistic rings tile the SSID-as-digits around each ring, so
+  the motif repeats; the full recoverable data is in the LSB layer, not the rings.
+  Possible cosmetic change: stretch the SSID once around the ring instead.
 - **Docs are stale**: `FIRST_FLASH.md` step 4 + `README.md` still say install the
   "QRCode" library (no longer used) and "core ≥ 3.x" (should pin 3.1.3).
 
