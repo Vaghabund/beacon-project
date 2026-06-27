@@ -17,6 +17,7 @@ import json
 import os
 
 import numpy as np
+from PIL import Image
 
 import rings_preview as rp                                   # real C rings encoder (ctypes)
 from test_data_roundtrip import build_payload, embed, save_bmp_manual  # verified embed + BMP writer
@@ -37,7 +38,7 @@ def main():
     ap.add_argument("image", nargs="?",
                     default=os.path.join(rp.ROOT, "sample-images", "mountains.jpg"))
     ap.add_argument("--nets", default=os.path.join(rp.HERE, "mock_wifi_networks.json"))
-    ap.add_argument("--out", default=os.path.join(rp.ROOT, "output", "sample_beacon.bmp"))
+    ap.add_argument("--out", default=os.path.join(rp.ROOT, "output", "sample_beacon.png"))
     args = ap.parse_args()
 
     rp.build_lib()
@@ -57,10 +58,15 @@ def main():
     payload = build_payload([to_payload_net(n) for n in nets])   # 2) hidden layer, after rings
     arr = embed(arr, payload)
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    save_bmp_manual(args.out, arr)                               # 3) lossless 24-bit BMP
+    if args.out.lower().endswith(".png"):
+        Image.fromarray(arr, "RGB").save(args.out)              # 3) lossless PNG — keeps the LSBs
+        fmt = "lossless PNG"
+    else:
+        save_bmp_manual(args.out, arr)                          # 3) lossless 24-bit BMP
+        fmt = "24-bit BMP"
 
     print(f"wrote {args.out}")
-    print(f"  {len(nets)} networks, payload {len(payload)} B, {w}x{h} 24-bit BMP")
+    print(f"  {len(nets)} networks, payload {len(payload)} B, {w}x{h} {fmt}")
     print(f"  drop it into web/index.html, or: python tools/decode_beacon.py {args.out}")
 
 

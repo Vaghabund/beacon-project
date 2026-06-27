@@ -6,6 +6,6 @@ import { decodeBeacon } from './decode.js';
 
 const path = process.argv[2] || '../_roundtrip.bmp';
 const data = new Uint8Array(fs.readFileSync(path));
-const r = decodeBeacon(data);
+const r = await decodeBeacon(data);          // BMP or PNG, auto-detected
 console.log(`decoded ${r.count} network(s), CRC OK`);
 for (const n of r.networks) console.log(' ', n);

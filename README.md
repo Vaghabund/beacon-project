@@ -7,7 +7,7 @@ One-button device. Three states:
 **LIVE VIEW** — camera streams to display as a lightweight viewfinder.
 Press button → pipeline runs. 10s idle → light sleep. 60s idle → deep sleep.
 
-**PIPELINE** — fresh capture → freeze frame on screen → WiFi scan (overlay shown) → encode rings → embed recoverable data → save BMP to flash → show result.
+**PIPELINE** — fresh capture → freeze frame on screen → WiFi scan (overlay shown) → encode rings → embed recoverable data → save PNG to flash → show result.
 Progress bar advances across bottom of screen.
 
 **RESULT VIEW** — encoded image held on screen.
@@ -102,12 +102,13 @@ rings_encode(src → dst)      artistic layer, baked first
         ↓
 data_embed_lsb(dst, payload) hidden layer written last — rings can't touch it
         ↓
-save_bmp(dst)                lossless BMP to LittleFS, or the LSB layer dies
+save_png(dst)                lossless PNG to LittleFS, or the LSB layer dies
 ```
 
 **The hard constraint: the image must be saved losslessly.** JPEG throws away
-exactly the low-order bits the payload lives in, so the device saves an
-uncompressed 24-bit **BMP** (~230 KB). Never re-save the file as JPEG.
+exactly the low-order bits the payload lives in, so the device saves a lossless
+**PNG** (`save_png()` uses zlib "stored"/uncompressed blocks — no compression
+library needed). Never re-save the file as JPEG.
 
 ### payload frame (`wifi_data.h`)
 
@@ -123,14 +124,14 @@ the payload right after embedding and logs `self-extract OK/FAILED` over serial.
 
 ### recovering the hidden data
 
-Images live on the device's LittleFS as `/beacon_NNNN.bmp`. Pull them off over USB
+Images live on the device's LittleFS as `/beacon_NNNN.png`. Pull them off over USB
 (the LittleFS uploader/downloader plugin, or a small serial/web dump), then on a
 laptop:
 
 ```
 pip install pillow numpy
-python tools/decode_beacon.py beacon_0001.bmp        # table
-python tools/decode_beacon.py *.bmp --json           # machine-readable
+python tools/decode_beacon.py beacon_0001.png        # table (PNG or BMP)
+python tools/decode_beacon.py *.png --json           # machine-readable
 ```
 
 `tools/test_data_roundtrip.py` mirrors the firmware in Python and decodes its own
@@ -145,7 +146,7 @@ button ≥0.8s** to enter SHARE mode:
 hold button → SoftAP "beacon-XXXX" up + DNS captive portal + HTTP server
             → display shows a WiFi-join QR
 phone scans QR → joins the open AP → captive portal pops the gallery
-              → tap an image → downloads the lossless BMP (LSB data intact)
+              → tap an image → downloads the lossless PNG (LSB data intact)
 press button → AP down, WiFi off, back to live view
 ```
 
@@ -156,7 +157,7 @@ press button → AP down, WiFi off, back to live view
   pop the captive portal most reliably. Downloads are served as
   `application/octet-stream` so phones save (not transcode) the file, keeping the
   hidden LSB payload byte-exact.
-- Filenames are validated (`beacon_*.bmp`, no path traversal) before serving.
+- Filenames are validated (`beacon_*.png`, no path traversal) before serving.
 
 Dependency: the **QRCode** library by Richard Moore (Arduino Library Manager →
 "QRCode"). `WiFi` / `WebServer` / `DNSServer` / `LittleFS` ship with arduino-esp32.
@@ -191,7 +192,7 @@ Dependency: the **QRCode** library by Richard Moore (Arduino Library Manager →
       ▼                                                        │
 [data_embed_lsb()]     hide scan in LSBs (after rings)         │
       ▼                                                        │
-[save_bmp()]           lossless BMP → LittleFS                 │
+[save_png()]           lossless PNG → LittleFS                 │
       ▼                                                        │
 [SPI blit]             ping-pong DMA, ~15ms                    │
       ▼                                                        │
@@ -234,7 +235,7 @@ Arduino version:  ≥ 3.x (ESP32 core)
 ```
 
 Images are saved to a LittleFS partition. The `partitions.csv` in the sketch folder
-gives a ~12.8MB data partition (~55 BMPs); select **Partition Scheme > Custom** to
+gives a ~12.8MB data partition (~55 images); select **Partition Scheme > Custom** to
 use it. With the default 1MB SPIFFS scheme you get ~4 images.
 
 ## libraries
@@ -313,7 +314,7 @@ it up (with hardware in hand to confirm live-view fps doesn't regress):
    to `Arduino_HWSPI` on a `SPIClass` you `begin(39, 40, 38)`, then
    `SD.begin(41, thatSpi)`. Both bracket their transfers in SPI transactions, so
    they coexist on the bus, selected by CS.
-2. Point `save_bmp()` at `SD` instead of `LittleFS` (one-line change — same BMP
+2. Point `save_png()` at `SD` instead of `LittleFS` (one-line change — same PNG
    bytes, same lossless guarantee).
 
 ## GPIO notes
@@ -336,7 +337,7 @@ it up (with hardware in hand to confirm live-view fps doesn't regress):
 | WiFi scan | 2–4s (hardware, unavoidable) |
 | rings_encode (5 networks) | ~50ms |
 | data_embed_lsb + self-extract | ~5ms |
-| save BMP to LittleFS (~230KB) | ~100–400ms (flash write) |
+| save PNG to LittleFS (~230KB, stored deflate) | ~100–400ms (flash write) |
 | SPI blit ping-pong DMA | ~15ms |
 | **total pipeline after press** | **~3–5s** (WiFi scan dominates) |
 
@@ -393,7 +394,7 @@ wifi_rings_esp32s3/             Arduino sketch — open THIS folder in the IDE
 tools/                          host-side dev tools (run with python from repo root)
   rings_preview.py                preview the real encoder on a photo, emit PNG
   rings_host.c                    C shim binding wifi_rings.c into rings_preview.py
-  decode_beacon.py                recover the hidden scan from a saved BMP
+  decode_beacon.py                recover the hidden scan from a saved PNG/BMP
   test_data_roundtrip.py          data-layer self-test (no hardware)
   mock_wifi_networks.json         mock scan data for rings_preview.py
 sample-images/                  default photo(s) for rings_preview.py

@@ -33,9 +33,11 @@
 //
 //  Arduino IDE settings:
 //    Board:            ESP32S3 Dev Module
-//    PSRAM:            OPI PSRAM   ← critical, must match R8 chip
+//    USB CDC On Boot:  Enabled     ← required for Serial over native USB
+//    PSRAM:            OPI PSRAM    ← critical, must match R8 chip
 //    Flash size:       16MB
-//    Partition scheme: Huge APP (3MB No OTA/1MB SPIFFS) or larger app partition
+//    Partition scheme: Custom      ← uses this folder's partitions.csv (~55 images)
+//                      (or "Huge APP (3MB No OTA/1MB SPIFFS)" for ~4 images)
 //    CPU frequency:    240MHz
 //    Core:             3.x (arduino-esp32)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,6 +52,7 @@
 #include <Arduino_GFX_Library.h>
 #include <LittleFS.h>
 #include <Preferences.h>
+#include <Wire.h>           // CST816 capacitive touch (used as a stand-in button)
 
 #include "wifi_rings.h"
 #include "wifi_data.h"
@@ -64,25 +67,36 @@ static_assert(sizeof(Pixel) == 3, "Pixel struct must be 3 bytes packed");
 #define IDLE_DEEP_SLEEP_MS    60000UL   // 60s idle → deep sleep
 #define CAPTURE_SETTLE_MS     100       // ms to let camera settle before fresh capture
 
+// ─── sleep enable (development) ───────────────────────────────────────────────
+// 0 = device stays fully awake in live/result view (no light or deep sleep).
+//     Deep sleep powers the board off — backlight off, USB CDC drops, and it
+//     only wakes via a full reboot, which makes development + re-flashing painful.
+// 1 = production power saving (the 10s light / 60s deep behaviour above).
+#define ENABLE_SLEEP  0
+
 // ─── pin assignments ──────────────────────────────────────────────────────────
 // Waveshare ESP32-S3-Touch-LCD-2 built-in display and camera mappings.
 
 #define PIN_BUTTON      0    // BOOT button = GPIO0, active LOW
 
-// Camera mapping from Waveshare's Arduino examples
+// Camera mapping — Waveshare ESP32-S3-Touch-LCD-2 schematic (see README
+// "camera mapping"). The data lines map to the OV2640 DVP bus as Y2..Y9, where
+// Y2 = D0 (LSB) and Y9 = D7 (MSB). Getting D0..D7 in the wrong order keeps the
+// timing/geometry perfect (that's VSYNC/HREF/PCLK) but scrambles every colour —
+// a bit-permutation that preserves brightness. That was the original bug.
 #define CAM_PWDN       17
 #define CAM_RESET      -1
 #define CAM_XCLK       8
 #define CAM_SIOD       21
 #define CAM_SIOC       16
-#define CAM_D7         10
-#define CAM_D6         14
-#define CAM_D5         11
-#define CAM_D4         15
-#define CAM_D3         13
-#define CAM_D2         12
-#define CAM_D1         7
-#define CAM_D0         2
+#define CAM_D7          2   // Y9 (MSB)
+#define CAM_D6          7   // Y8
+#define CAM_D5         10   // Y7
+#define CAM_D4         14   // Y6
+#define CAM_D3         11   // Y5
+#define CAM_D2         15   // Y4
+#define CAM_D1         13   // Y3
+#define CAM_D0         12   // Y2 (LSB)
 #define CAM_VSYNC      6
 #define CAM_HREF       4
 #define CAM_PCLK       9
@@ -96,9 +110,19 @@ static_assert(sizeof(Pixel) == 3, "Pixel struct must be 3 bytes packed");
 #define LCD_BL         1
 #define LCD_ROTATION   1
 
+// ─── capacitive touch (CST816D, shared I2C with the IMU) ──────────────────────
+// From the board schematic: TP_SDA=IO48, TP_SCL=IO47, TP_INT=IO46. TP_RESET is
+// tied to the board reset net (no GPIO to drive). CST816D I2C address = 0x15.
+// Used here as a stand-in button: a finger tap counts as a button press, so the
+// device is usable before a physical button is soldered to GPIO0.
+#define TP_SDA         48
+#define TP_SCL         47
+#define TP_INT         46
+#define TP_ADDR        0x15
+
 // ─── storage ───────────────────────────────────────────────────────────────────
-//  Encoded BMPs are saved to internal flash via LittleFS (see storage_init /
-//  save_bmp). No SPI sharing, no risk to the display.
+//  Encoded images are saved to internal flash via LittleFS as lossless PNG
+//  (see storage_init / save_png). No SPI sharing, no risk to the display.
 //
 //  FUTURE microSD UPGRADE (for capacity): the SD slot is SPI and SHARES the LCD
 //  bus — verified from the schematic:
@@ -154,6 +178,11 @@ uint8_t     g_payload[WBCN_MAX_FRAME];  // framed scan data, embedded into LSBs
 enum class AppState { LIVE_VIEW, PIPELINE, RESULT_VIEW };
 AppState g_state = AppState::LIVE_VIEW;
 
+// Defined here (not next to poll_press) so it precedes the auto-generated
+// function prototypes the Arduino build inserts at the top of the sketch —
+// a scoped enum used as a return type must be visible before those prototypes.
+enum class Press { NONE, SHORT, LONG };
+
 // ─── progress bar ─────────────────────────────────────────────────────────────
 // 4px bar at bottom edge, 5 pipeline stages (capture, scan, encode, save, blit)
 #define PROGRESS_STAGES  5
@@ -196,6 +225,7 @@ static void fatal(const char* msg) {
 }
 
 // ─── sleep helpers ────────────────────────────────────────────────────────────
+#if ENABLE_SLEEP
 
 // Light sleep: CPU pauses, PSRAM + camera XCLK stay powered.
 // Returns when GPIO0 falls (button press). Wake is ~2ms.
@@ -217,10 +247,48 @@ static void enter_deep_sleep() {
     // never returns
 }
 
+#endif  // ENABLE_SLEEP
+
+// ─── capacitive touch ─────────────────────────────────────────────────────────
+// Polls the CST816 over I2C; a finger on the panel reads as a button press.
+static bool g_touch_ok = false;
+
+// Touch runs on Wire (I2C port 0). The camera installs its own SCCB driver on
+// I2C port 1 (its default when pin_sccb_sda is a real pin), so port 0 is free.
+static void touch_init() {
+    Wire.begin(TP_SDA, TP_SCL, 400000);
+    pinMode(TP_INT, INPUT);
+    delay(5);
+    Wire.beginTransmission(TP_ADDR);
+    if (Wire.endTransmission() == 0) {
+        g_touch_ok = true;
+        // DisAutoSleep (reg 0xFE)=1 keeps the controller responsive to polling.
+        Wire.beginTransmission(TP_ADDR);
+        Wire.write(0xFE);
+        Wire.write(0x01);
+        Wire.endTransmission();
+        Serial.println("touch (CST816) ready");
+    } else {
+        Serial.println("touch not detected — GPIO0/BOOT still works as the button");
+    }
+}
+
+// True while a finger is on the panel. Reads the CST816 finger-count register
+// (0x02, low nibble); returns false on any I2C error so it degrades gracefully.
+static bool touch_pressed() {
+    if (!g_touch_ok) return false;
+    Wire.beginTransmission(TP_ADDR);
+    Wire.write(0x02);                        // FingerNum register
+    if (Wire.endTransmission(false) != 0) return false;   // repeated start
+    if (Wire.requestFrom(TP_ADDR, 1) != 1) return false;
+    return (Wire.read() & 0x0F) > 0;         // low nibble = touch-point count
+}
+
 // ─── button helpers ───────────────────────────────────────────────────────────
 
+// GPIO0 (BOOT button) OR a screen touch both count as "the button".
 static bool button_pressed() {
-    return digitalRead(PIN_BUTTON) == LOW;
+    return (digitalRead(PIN_BUTTON) == LOW) || touch_pressed();
 }
 
 // Block until button is fully released, then return.
@@ -242,8 +310,7 @@ static bool poll_button() {
 // press, then returns once the button is released (or once the long-press
 // threshold is crossed). Call repeatedly in a loop.
 #define LONG_PRESS_MS  800
-enum class Press { NONE, SHORT, LONG };
-static Press poll_press() {
+static Press poll_press() {   // Press enum is defined up in the state section
     if (!button_pressed()) return Press::NONE;
     delay(30);
     if (!button_pressed()) return Press::NONE;   // debounce bounce/noise
@@ -273,19 +340,41 @@ static bool camera_init() {
     cfg.ledc_timer   = LEDC_TIMER_0;
     cfg.ledc_channel = LEDC_CHANNEL_0;
 
-    // JPEG capture — not RGB direct (avoids PSRAM bandwidth corruption with WiFi)
-    cfg.pixel_format = PIXFORMAT_JPEG;
+    // RGB565 direct capture (not JPEG). The OV2640 on this board does not produce
+    // JPEG frames here — esp_camera_fb_get() times out — but RGB565 works. Capture
+    // always happens with WiFi off (live view, or the pipeline before the scan),
+    // so there is no PSRAM bandwidth contention to avoid.
+    cfg.pixel_format = PIXFORMAT_RGB565;
     cfg.frame_size   = FRAMESIZE_QVGA;  // 320×240 matches display
-    cfg.jpeg_quality = 63;              // lowest quality = smallest file = fastest live view
-                                        // pipeline bumps this to 12 before capture
-    cfg.fb_count     = 2;               // double-buffer: camera writes frame N+1 while we decode N
+    cfg.jpeg_quality = 0;               // unused in RGB565 mode
+    cfg.fb_count     = 2;               // double-buffer: camera fills one while we read the other
     cfg.fb_location  = CAMERA_FB_IN_PSRAM;
-    cfg.grab_mode    = CAMERA_GRAB_LATEST;  // always return newest frame, never stall
+    cfg.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;  // wait for a fresh frame to be ready
 
     esp_err_t err = esp_camera_init(&cfg);
     if (err != ESP_OK) {
         Serial.printf("Camera init failed: 0x%x\n", err);
         return false;
+    }
+    // DIAGNOSTIC: report the detected sensor so we know SCCB really works.
+    sensor_t* s = esp_camera_sensor_get();
+    if (s) Serial.printf("camera sensor: PID=0x%02X VER=0x%02X MIDH=0x%02X MIDL=0x%02X\n",
+                         s->id.PID, s->id.VER, s->id.MIDH, s->id.MIDL);
+    else   Serial.println("camera init OK but sensor_get() == NULL");
+
+    // Sensor tuning. The OV2640 boots uncalibrated: no white balance, no auto
+    // exposure → green-starved, oversaturated, posterised colour. These six
+    // calls (matching the old working firmware) turn on AWB + auto-exposure and
+    // tame saturation, which is what actually fixes the colour — the RGB565
+    // decode was already correct.
+    if (s) {
+        s->set_brightness(s,     1);
+        s->set_contrast(s,       0);
+        s->set_saturation(s,     1);
+        s->set_whitebal(s,       1);   // white balance on
+        s->set_awb_gain(s,       1);   // auto white-balance gain on
+        s->set_exposure_ctrl(s,  1);   // auto exposure on
+        s->set_gain_ctrl(s,      1);   // auto gain on
     }
     return true;
 }
@@ -301,16 +390,46 @@ static void blit_frame(const Pixel* src) {
 
 // ─── grab one JPEG frame, decode to dst, return false on failure ──────────────
 static bool grab_frame(Pixel* dst) {
+    static int dbg = 0;                       // DIAGNOSTIC: log first few grabs only
     camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb) return false;
-    bool ok = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, (uint8_t*)dst);
+    if (!fb) {
+        if (dbg++ < 8) Serial.println("grab: esp_camera_fb_get() == NULL (no frame arriving)");
+        return false;
+    }
+    bool ok = fmt2rgb888(fb->buf, fb->len, fb->format, (uint8_t*)dst);
+    if (dbg < 8) {
+        Serial.printf("grab: fb len=%u fmt=%d %ux%u decode=%s\n",
+                      (unsigned)fb->len, (int)fb->format,
+                      (unsigned)fb->width, (unsigned)fb->height, ok ? "OK" : "FAIL");
+        dbg++;
+    }
     esp_camera_fb_return(fb);
+
+    // fmt2rgb888() emits RGB565 as B,G,R bytes (it targets BMP, which is BGR).
+    // Our pipeline treats g_src as true RGB888 (Pixel{r,g,b}), so swap R<->B
+    // back to RGB here — otherwise warm scenes render blue/purple.
+    if (ok) {
+        uint8_t* p = (uint8_t*)dst;
+        for (int i = 0; i < IMG_PIXELS; i++, p += 3) {
+            uint8_t t = p[0]; p[0] = p[2]; p[2] = t;
+        }
+    }
     return ok;
 }
 
 // ─── wifi scan ────────────────────────────────────────────────────────────────
 static void do_wifi_scan() {
+    // The first scan after a cold radio start often returns a negative error
+    // (WIFI_SCAN_FAILED = -2) or 0 — that was the "failed first scan". Retry a
+    // few times, clearing stale scan state between attempts, until it succeeds.
     int found = WiFi.scanNetworks(false, true);
+    for (int attempt = 0; found <= 0 && attempt < 4; attempt++) {
+        Serial.printf("scan attempt %d returned %d — retrying\n", attempt + 1, found);
+        WiFi.scanDelete();
+        delay(200);
+        found = WiFi.scanNetworks(false, true);
+    }
+    if (found < 0) found = 0;
     g_n_nets = 0;
     for (int i = 0; i < found && g_n_nets < MAX_NETWORKS; i++) {
         strncpy(g_nets[g_n_nets].ssid, WiFi.SSID(i).c_str(), MAX_SSID_LEN - 1);
@@ -355,58 +474,96 @@ static uint32_t next_seq() {
     return s;
 }
 
-static inline void put_le16(uint8_t* p, uint16_t v) {
-    p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)(v >> 8);
-}
-static inline void put_le32(uint8_t* p, uint32_t v) {
-    p[0] = (uint8_t)(v & 0xFF);        p[1] = (uint8_t)((v >> 8)  & 0xFF);
-    p[2] = (uint8_t)((v >> 16) & 0xFF); p[3] = (uint8_t)((v >> 24) & 0xFF);
+static inline void put_be32(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
 }
 
-// Write img as a 24-bit uncompressed BMP (lossless — preserves the LSB payload).
-// BMP is stored bottom-up and BGR; the host decoder reads it back top-down RGB,
-// so per-pixel channel values — and their LSBs — are preserved exactly.
-// On success fills out_path with the filename written. Returns false if no FS.
-static bool save_bmp(const Pixel* img, char* out_path, size_t path_len) {
+// CRC-32 (PNG chunks) and Adler-32 (zlib) — bitwise, no tables, no deps.
+static uint32_t crc32_update(uint32_t crc, const uint8_t* d, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        crc ^= d[i];
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320u : (crc >> 1);
+    }
+    return crc;
+}
+static uint32_t adler32_update(uint32_t adler, const uint8_t* d, size_t n) {
+    uint32_t a = adler & 0xFFFF, b = (adler >> 16) & 0xFFFF;
+    for (size_t i = 0; i < n; i++) { a = (a + d[i]) % 65521u; b = (b + a) % 65521u; }
+    return (b << 16) | a;
+}
+static void png_chunk(File& f, const char* type, const uint8_t* data, uint32_t len) {
+    uint8_t lt[4]; put_be32(lt, len); f.write(lt, 4);
+    uint32_t crc = 0xFFFFFFFFu;
+    f.write((const uint8_t*)type, 4); crc = crc32_update(crc, (const uint8_t*)type, 4);
+    if (len) { f.write(data, len); crc = crc32_update(crc, data, len); }
+    uint8_t cb[4]; put_be32(cb, crc ^ 0xFFFFFFFFu); f.write(cb, 4);
+}
+
+// Write img as a lossless 24-bit PNG (RGB, top-down) — preserves the LSB payload.
+// Uses zlib "stored" (uncompressed) deflate blocks, so a valid PNG is produced
+// with NO compression library. The host decoders read the pixel LSBs byte-exact.
+// On success fills out_path. Returns false if no FS / no PSRAM.
+static bool save_png(const Pixel* img, char* out_path, size_t path_len) {
     if (!g_fs_ok) return false;
 
     const uint32_t seq = next_seq();
-    snprintf(out_path, path_len, "/beacon_%04u.bmp", (unsigned)seq);
+    snprintf(out_path, path_len, "/beacon_%04u.png", (unsigned)seq);
 
-    const int      row_raw    = IMG_W * 3;
-    const int      pad        = (4 - (row_raw & 3)) & 3;   // rows align to 4 bytes
-    const int      row_padded = row_raw + pad;
-    const uint32_t img_size   = (uint32_t)row_padded * IMG_H;
+    const uint32_t rowlen = 1u + (uint32_t)IMG_W * 3;       // filter byte + RGB
+    const uint32_t rawlen = rowlen * (uint32_t)IMG_H;
 
-    uint8_t hdr[54] = {0};
-    hdr[0] = 'B'; hdr[1] = 'M';
-    put_le32(&hdr[2],  54 + img_size);   // file size
-    put_le32(&hdr[10], 54);              // pixel data offset
-    put_le32(&hdr[14], 40);              // BITMAPINFOHEADER size
-    put_le32(&hdr[18], IMG_W);
-    put_le32(&hdr[22], IMG_H);           // positive height → bottom-up rows
-    put_le16(&hdr[26], 1);               // planes
-    put_le16(&hdr[28], 24);              // bits per pixel
-    put_le32(&hdr[34], img_size);
-    put_le32(&hdr[38], 2835);            // ~72 DPI, x
-    put_le32(&hdr[42], 2835);            // ~72 DPI, y
+    uint8_t* raw = (uint8_t*)heap_caps_malloc(rawlen, MALLOC_CAP_SPIRAM);
+    if (!raw) { Serial.println("png: PSRAM alloc failed"); return false; }
+
+    uint32_t k = 0;                                         // filtered scanlines, top-down
+    for (int y = 0; y < IMG_H; y++) {
+        raw[k++] = 0;                                       // filter: none
+        const Pixel* s = &img[y * IMG_W];
+        for (int x = 0; x < IMG_W; x++) { raw[k++] = s[x].r; raw[k++] = s[x].g; raw[k++] = s[x].b; }
+    }
 
     File f = LittleFS.open(out_path, "w");
-    if (!f) { Serial.printf("open %s failed\n", out_path); return false; }
-    f.write(hdr, sizeof(hdr));
+    if (!f) { heap_caps_free(raw); Serial.printf("open %s failed\n", out_path); return false; }
 
-    uint8_t row[IMG_W * 3 + 4];
-    for (int i = row_raw; i < row_padded; i++) row[i] = 0;   // zero pad once
-    for (int y = IMG_H - 1; y >= 0; y--) {                   // bottom-up
-        const Pixel* s = &img[y * IMG_W];
-        for (int x = 0; x < IMG_W; x++) {
-            row[x * 3 + 0] = s[x].b;   // BMP byte order is B,G,R
-            row[x * 3 + 1] = s[x].g;
-            row[x * 3 + 2] = s[x].r;
-        }
-        f.write(row, row_padded);
+    static const uint8_t sig[8] = {137,80,78,71,13,10,26,10};
+    f.write(sig, 8);
+
+    uint8_t ihdr[13];
+    put_be32(ihdr,     (uint32_t)IMG_W);
+    put_be32(ihdr + 4, (uint32_t)IMG_H);
+    ihdr[8]=8; ihdr[9]=2; ihdr[10]=0; ihdr[11]=0; ihdr[12]=0;   // 8-bit, RGB, no interlace
+    png_chunk(f, "IHDR", ihdr, 13);
+
+    // IDAT = zlib header (0x78 0x01) + stored deflate blocks + adler32 trailer
+    const uint32_t nblocks = (rawlen + 65534u) / 65535u;
+    const uint32_t idatlen = 2u + nblocks * 5u + rawlen + 4u;
+    uint8_t lt[4]; put_be32(lt, idatlen); f.write(lt, 4);
+    uint32_t crc = 0xFFFFFFFFu;
+    const uint8_t typ[4] = {'I','D','A','T'};
+    f.write(typ, 4); crc = crc32_update(crc, typ, 4);
+    const uint8_t zh[2] = {0x78, 0x01}; f.write(zh, 2); crc = crc32_update(crc, zh, 2);
+
+    uint32_t adler = 1u, pos = 0;
+    while (pos < rawlen) {
+        uint32_t blk = rawlen - pos; if (blk > 65535u) blk = 65535u;
+        const uint16_t L = (uint16_t)blk, N = (uint16_t)~L;
+        uint8_t bh[5] = { (uint8_t)((pos + blk >= rawlen) ? 1 : 0),  // BFINAL on last, BTYPE=stored
+                          (uint8_t)(L & 0xFF), (uint8_t)(L >> 8),
+                          (uint8_t)(N & 0xFF), (uint8_t)(N >> 8) };
+        f.write(bh, 5);          crc = crc32_update(crc, bh, 5);
+        f.write(raw + pos, blk); crc = crc32_update(crc, raw + pos, blk);
+        adler = adler32_update(adler, raw + pos, blk);
+        pos += blk;
     }
+    uint8_t ad[4]; put_be32(ad, adler); f.write(ad, 4); crc = crc32_update(crc, ad, 4);
+    uint8_t cb[4]; put_be32(cb, crc ^ 0xFFFFFFFFu); f.write(cb, 4);   // IDAT CRC
+
+    png_chunk(f, "IEND", nullptr, 0);
+
     f.close();
+    heap_caps_free(raw);
     return true;
 }
 
@@ -418,7 +575,7 @@ static bool save_bmp(const Pixel* img, char* out_path, size_t path_len) {
 static void run_live_view() {
     Serial.println("live view");
     unsigned long last_activity = millis();
-    bool light_slept = false;
+    (void)last_activity;
 
     while (true) {
         // ── grab + blit frame ────────────────────────────────────────────────
@@ -431,6 +588,7 @@ static void run_live_view() {
             return;  // caller will run pipeline
         }
 
+#if ENABLE_SLEEP
         // ── idle timers ──────────────────────────────────────────────────────
         unsigned long idle = millis() - last_activity;
 
@@ -445,6 +603,7 @@ static void run_live_view() {
             wait_release();
             last_activity = millis();  // reset timer after wake
         }
+#endif
     }
 }
 
@@ -485,7 +644,11 @@ static bool run_pipeline() {
     WiFi.disconnect();
     do_wifi_scan();
     WiFi.scanDelete();
-    esp_wifi_stop();
+    // Tear down through the Arduino WiFi state machine (NOT raw esp_wifi_stop):
+    // esp_wifi_stop() stopped the radio behind the Arduino WiFi class's back, so
+    // the next run's WiFi.mode(STA) thought it was already started and never
+    // restarted it — every scan after the first came back empty (no rings).
+    WiFi.mode(WIFI_OFF);
     delay(50);
     Serial.printf("[%lu ms] scan done\n", millis() - t0);
 
@@ -513,10 +676,10 @@ static bool run_pipeline() {
     }
     Serial.printf("[%lu ms] encode + embed done\n", millis() - t0);
 
-    // ── 4. Save lossless BMP (JPEG would destroy the LSB payload) ──────────────
+    // ── 4. Save lossless PNG (JPEG would destroy the LSB payload) ──────────────
     progress_bar(4);
     char path[24];
-    if (save_bmp(g_dst, path, sizeof(path)))
+    if (save_png(g_dst, path, sizeof(path)))
         Serial.printf("[%lu ms] saved %s\n", millis() - t0, path);
     else
         Serial.println("save skipped (no filesystem)");
@@ -540,6 +703,7 @@ static bool run_pipeline() {
 static void run_result_view() {
     Serial.println("result view (tap = live view, hold = share/QR)");
     unsigned long last_activity = millis();
+    (void)last_activity;
 
     while (true) {
         // ── button: tap → live view, hold → share mode ────────────────────────
@@ -552,6 +716,7 @@ static void run_result_view() {
             return;                       // exit share → live view
         }
 
+#if ENABLE_SLEEP
         unsigned long idle = millis() - last_activity;
 
         if (idle >= IDLE_DEEP_SLEEP_MS) {
@@ -565,6 +730,7 @@ static void run_result_view() {
             // Button press in result view → go back to live view
             return;
         }
+#endif
 
         delay(10);
     }
@@ -589,6 +755,9 @@ void setup() {
 
     // ── button ───────────────────────────────────────────────────────────────
     pinMode(PIN_BUTTON, INPUT_PULLUP);
+
+    // ── touch (stand-in button until a GPIO0 button is soldered) ──────────────
+    touch_init();
 
     // ── PSRAM check ──────────────────────────────────────────────────────────
     Serial.printf("PSRAM: %d bytes total, %d bytes free\n",
