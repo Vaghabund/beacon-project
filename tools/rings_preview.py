@@ -33,8 +33,9 @@ LIB = os.path.join(HERE, "rings_host.dll" if os.name == "nt" else "librings_host
 SRCS = [os.path.join(HERE, "rings_host.c"), os.path.join(FW, "wifi_rings.c")]
 
 # RING_CONFIG_DEFAULT, mirrored from wifi_rings.h
-DEFAULTS = dict(inner_radius=18, ring_thickness=22, ring_gap=2,
-                max_displace=36, min_displace=2, sort_dir=0, disp_mode=0)
+# NB: max/min_displace are now percentages of band width (smear no longer overflows)
+DEFAULTS = dict(inner_radius=14, ring_thickness=30, ring_gap=0,
+                max_displace=100, min_displace=10, sort_dir=0, disp_mode=0)
 
 
 def build_lib(force=False):
