@@ -16,3 +16,5 @@ output/
 tools/mock_*.json
 tools/show_strings.py
 sample-images/testgrad.png
+# arduino-cli direct-flash artifacts
+_build/

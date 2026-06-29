@@ -1,404 +1,297 @@
-# wifi_rings — Waveshare ESP32-S3-Touch-LCD-2 build guide
+# BEACON
 
-## what this does
+**A one-button camera that paints the invisible Wi-Fi around you into the photo it takes — and hides the real scan data inside the same image so it can be read back later.**
 
-One-button device. Three states:
+Point it, tap it. It freezes a frame, scans every Wi-Fi network in range, and warps the photo into concentric rings of radial pixel-sort — one ring per network, the pattern driven by each network's own identity, the smear driven by its signal strength. The exact scan (SSID, MAC, channel, RSSI) is steganographically embedded in the pixels, so a companion web tool can recover the network list from a saved image. Hold the button and the device becomes a Wi-Fi hotspot serving a little OSINT gallery of everything it has captured.
 
-**LIVE VIEW** — camera streams to display as a lightweight viewfinder.
-Press button → pipeline runs. 10s idle → light sleep. 60s idle → deep sleep.
+It runs entirely on one ESP32-S3 board — camera, display, touch, Wi-Fi, storage, web server — no phone app, no cloud.
 
-**PIPELINE** — fresh capture → freeze frame on screen → WiFi scan (overlay shown) → encode rings → embed recoverable data → save PNG to flash → show result.
-Progress bar advances across bottom of screen.
-
-**RESULT VIEW** — encoded image held on screen.
-Tap button → back to live view. **Hold button (≥0.8s) → SHARE mode.**
-10s idle → light sleep. 60s idle → deep sleep.
-
-**SHARE mode** — the device opens an open captive-portal Wi-Fi AP and shows a
-**Wi-Fi-join QR** on screen. Scan it with a phone → it joins the AP → the captive
-portal auto-opens a gallery of all saved images, tap one to download. Press the
-button to exit (Wi-Fi off, back to live view).
-
-Deep sleep always wakes into live view — no edge cases.
+> **New here? Read [docs/ENCODING.md](docs/ENCODING.md)** for the step-by-step visual walkthrough of how a Wi-Fi scan becomes the rings.
 
 ---
 
-## hardware
+## what / why / how
+
+**What it is.** A self-contained device that treats a Wi-Fi scan as both *art* and *data*. Every capture carries the same scan twice: once as a one-way visualisation (the rings — beautiful, not decodable), and once as an exact, recoverable payload hidden in the pixel LSBs.
+
+**Why.** Wi-Fi is an invisible fingerprint of a place — the networks, their vendors, their signal strengths are a kind of ambient portrait of where you're standing. BEACON makes that fingerprint visible *and* keeps it honest: the picture isn't a random filter, it's a direct readout of the radio environment, and the ground truth travels inside the file.
+
+**How.** A fixed pipeline runs on one button press:
+
+```
+freeze frame → Wi-Fi scan → encode rings (art) → embed scan in LSBs (data) → save lossless PNG → show result
+```
+
+Nothing in the pipeline runs concurrently, so there's no PSRAM-bandwidth contention between the camera, the radio, and the encoder.
+
+---
+
+## what to buy & build
 
 | part | notes |
 |------|-------|
-| Waveshare ESP32-S3-Touch-LCD-2 | ESP32-S3R8, 8MB OPI PSRAM, 16MB flash, built-in ST7789T3 display |
-| OV5640 or OV2640 | camera plugs into the board's 24-pin connector |
-| built-in ST7789T3 | 240×320 native panel, used in landscape via rotation 1 |
-| one button | GPIO0 / BOOT, active LOW, internal pullup |
-| internal flash | 16MB — images saved to a LittleFS partition (default storage) |
-| microSD card | onboard slot, SPI, **shares the LCD bus** — optional capacity upgrade (see below) |
+| **Waveshare ESP32-S3-Touch-LCD-2** | the whole computer: ESP32-S3R8, 8 MB OPI PSRAM, 16 MB flash, a 240×320 ST7789T3 display, CST816 capacitive touch, and a 24-pin camera connector. This is the only board you need. |
+| **OV2640 camera module** | the 24-pin FPC camera that mates with the board's connector. OV5640 also works. This is what the device "sees." |
+| **USB-C cable** | power + flashing + serial. |
+| *(optional)* microSD card | the slot is wired but unused today — a future capacity upgrade (see [hardware reference](#hardware-reference)). |
+| *(optional)* tactile button on GPIO0 | not required — a **finger tap on the screen already acts as the button**. Solder one to GPIO0/BOOT if you want a physical click. |
+| *(coming)* 3D-printed enclosure | print files will be added to this repo. |
+
+**Assembly:** seat the camera ribbon in the 24-pin connector, plug in USB-C, flash. That's it.
 
 ---
 
-## memory layout
+## flashing it
 
-```
-internal SRAM (~512KB)
-  Arduino + FreeRTOS runtime    ~180KB
-  WiFi stack                    ~100KB
-  stacks + misc                  ~30KB
-  cos/sin LUT (1024 × 4B × 2)     8KB   ← hot path, must be internal
-  DMA line buf A (320 × 2B)       640B   ← must be internal (DMA rule)
-  DMA line buf B (320 × 2B)       640B   ← must be internal (DMA rule)
-  ray_buf (stack, per call)       ~1KB
-  ──────────────────────────────────────
-  headroom                       ~200KB
+The firmware is an Arduino sketch. The toolchain is **pinned** — using newer versions will break the build, so match these exactly.
 
-PSRAM (8MB OPI)
-  g_src  320×240×3 RGB888        230KB   ← decoded camera frame
-  g_dst  320×240×3 RGB888        230KB   ← encoded output
-  camera JPEG framebuf           ~50KB   ← managed by esp_camera
-  ──────────────────────────────────────
-  total used                    ~510KB
-  headroom                      ~7.5MB
-```
+### one-time setup
 
-**The one rule you must follow:**
-- Big image buffers → PSRAM (`MALLOC_CAP_SPIRAM`)
-- DMA transfer buffers → internal SRAM (`MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL`)
-- Everything else → wherever malloc puts it
+1. Install **Arduino IDE 2.x**.
+2. In Boards Manager, install **esp32 by Espressif `3.1.3`** — **not** the latest.
+   *Core 3.3.x changed `spiFrequencyToClockDiv()` to take a `spi_t*`, which breaks the display library. 3.1.3 has the signature it expects.*
+3. In Library Manager, install **GFX Library for Arduino `1.5.4`**.
+4. **Do not install any "QRCode" library.** The QR encoder used here is the one **bundled inside the esp32 core** (`<qrcode.h>` → `esp_qrcode_*`). Richard Moore's "QRCode" library has the same header name and will collide.
+5. Connect the board over USB-C.
 
----
+`WiFi`, `WebServer`, `DNSServer`, `LittleFS`, `Preferences`, and the camera + QR components all ship with the esp32 core — nothing else to install.
 
-## why JPEG capture (not RGB direct)
+### IDE settings
 
-Espressif's own driver docs warn against capturing RGB888 directly when WiFi
-is active — PSRAM write bandwidth is shared and frames can be corrupted or
-incomplete. The correct pattern universally adopted by the community:
-
-```
-capture JPEG  →  WiFi off  →  fmt2rgb888() decode  →  process  →  display
-```
-
-JPEG at QVGA is ~15–50KB. RGB888 at QVGA is 230KB. JPEG is ~5–10× smaller,
-faster to write into PSRAM, and the decode step (`fmt2rgb888`) is fast (~10ms).
-
----
-
-## two layers: artwork + recoverable data
-
-Each capture carries the WiFi scan **twice**, in two independent layers:
-
-1. **Artistic layer (`wifi_rings.c`)** — concentric rings warp the photo. Signal
-   strength drives radial displacement; SSID bytes drive per-ray sort depth. This
-   is a *one-way visualisation* — you cannot read the networks back out of it.
-
-2. **Recoverable layer (`wifi_data.c`)** — the *exact* scan (SSID, BSSID, RSSI,
-   channel) is hidden in the pixel LSBs as a framed, CRC-checked payload. A host
-   decoder reads it straight back.
-
-**Ordering is what keeps them from fighting:** the LSB embed runs **after**
-`rings_encode()`, so the pixel-sort can never overwrite the payload, and a ±1 LSB
-nudge is invisible against the rings.
-
-```
-rings_encode(src → dst)      artistic layer, baked first
-        ↓
-data_embed_lsb(dst, payload) hidden layer written last — rings can't touch it
-        ↓
-save_png(dst)                lossless PNG to LittleFS, or the LSB layer dies
-```
-
-**The hard constraint: the image must be saved losslessly.** JPEG throws away
-exactly the low-order bits the payload lives in, so the device saves a lossless
-**PNG** (`save_png()` uses zlib "stored"/uncompressed blocks — no compression
-library needed). Never re-save the file as JPEG.
-
-### payload frame (`wifi_data.h`)
-
-```
-magic 'WBCN' | version(1) | n_nets(1)
-  per net:  ssid_len(1) | ssid | bssid[6] | rssi(int8) | channel(1)
-crc16 (CCITT-FALSE, big-endian) over everything before it
-```
-
-Capacity at 320×240×3 = 230,400 LSBs ≈ 28 KB; a full 12-network payload is < 1 KB,
-so 1 LSB/channel (the least visible option) is used. The device also self-extracts
-the payload right after embedding and logs `self-extract OK/FAILED` over serial.
-
-### recovering the hidden data
-
-Images live on the device's LittleFS as `/beacon_NNNN.png`. Pull them off over USB
-(the LittleFS uploader/downloader plugin, or a small serial/web dump), then on a
-laptop:
-
-```
-pip install pillow numpy
-python tools/decode_beacon.py beacon_0001.png        # table (PNG or BMP)
-python tools/decode_beacon.py *.png --json           # machine-readable
-```
-
-`tools/test_data_roundtrip.py` mirrors the firmware in Python and decodes its own
-output — run it to sanity-check the format end-to-end without hardware (prints `PASS`).
-
-### share mode — scan to download (`beacon_share.cpp`)
-
-No card reader needed to get images off the device. In RESULT VIEW, **hold the
-button ≥0.8s** to enter SHARE mode:
-
-```
-hold button → SoftAP "beacon-XXXX" up + DNS captive portal + HTTP server
-            → display shows a WiFi-join QR
-phone scans QR → joins the open AP → captive portal pops the gallery
-              → tap an image → downloads the lossless PNG (LSB data intact)
-press button → AP down, WiFi off, back to live view
-```
-
-- The QR encodes a standard Wi-Fi-join string (`WIFI:T:nopass;S:beacon-XXXX;;`),
-  so one scan joins the network; the captive portal then opens `http://192.168.4.1`
-  automatically. The SSID + URL are also printed on screen as a manual fallback.
-- The AP is **open** (no password) — it's local and ephemeral, and open networks
-  pop the captive portal most reliably. Downloads are served as
-  `application/octet-stream` so phones save (not transcode) the file, keeping the
-  hidden LSB payload byte-exact.
-- Filenames are validated (`beacon_*.png`, no path traversal) before serving.
-
-Dependency: the **QRCode** library by Richard Moore (Arduino Library Manager →
-"QRCode"). `WiFi` / `WebServer` / `DNSServer` / `LittleFS` ship with arduino-esp32.
-
----
-
-## workflow
-
-```
-[deep sleep]
-      │  button press (EXT0, falling edge) → full reboot ~300ms
-      ▼
-[LIVE VIEW] ←─────────────────────────────────────────────────┐
-      │  JPEG grab → decode → blit, ~5-8 fps                  │
-      │  10s idle → light sleep (XCLK running, ~2ms wake)     │
-      │  60s idle → deep sleep                                 │
-      │  button press                                          │
-      ▼                                                        │
-[100ms settle]                                                 │
-      ▼                                                        │
-[fresh JPEG capture]   dedicated frame, no live-view bleed     │
-      ▼                                                        │
-[freeze frame on screen]  photo shown immediately              │
-      │  "scanning wifi..." overlay drawn over image           │
-      ▼                                                        │
-[WiFi scan]            2-4s, photo visible behind overlay      │
-      │                  → fills g_nets[], sorted by dBm desc  │
-      ▼                                                        │
-[WiFi off]             stop before encode to free PSRAM BW     │
-      ▼                                                        │
-[rings_encode()]       read g_src → write g_dst, pure CPU      │
-      ▼                                                        │
-[data_embed_lsb()]     hide scan in LSBs (after rings)         │
-      ▼                                                        │
-[save_png()]           lossless PNG → LittleFS                 │
-      ▼                                                        │
-[SPI blit]             ping-pong DMA, ~15ms                    │
-      ▼                                                        │
-[RESULT VIEW]                                                  │
-      │  image held on screen, progress bar full               │
-      │  tap button → live view ───────────────────────────────┤
-      │  hold button → SHARE mode (AP + QR + gallery) → live ───┤
-      │  10s idle → light sleep (XCLK running)                 │
-      │  60s idle → deep sleep                                 │
-      │  tap (after wake) ─────────────────────────────────────┘
-```
-
-Nothing in the pipeline runs simultaneously. No PSRAM bandwidth contention.
-
-## sleep behaviour
-
-| mode | trigger | wake time | XCLK | use |
-|------|---------|-----------|------|-----|
-| light sleep | 10s idle | ~2ms | running | short idle, fast resume |
-| deep sleep | 60s idle | ~300ms (reboot) | off | long idle, lowest power |
-
-Light sleep keeps camera XCLK running so the sensor maintains state.
-Deep sleep always wakes into LIVE VIEW — result view is never the wake target.
-
----
-
-## arduino IDE setup
-
-Open the **`wifi_rings_esp32s3/`** folder as the sketch (the `.ino` and all its
-`.c/.h/.cpp` live there together, as Arduino requires).
+Open the **`wifi_rings_esp32s3/`** folder as the sketch (the `.ino` plus all its `.c/.h/.cpp` live together, as Arduino requires).
 
 ```
 Board:            ESP32S3 Dev Module
-PSRAM:            OPI PSRAM          ← critical, must match R8 chip
-Flash size:       16MB
-Partition scheme: Custom            ← uses wifi_rings_esp32s3/partitions.csv (~12.8MB LittleFS, ~55 images)
-                  (or "Huge APP (3MB No OTA/1MB SPIFFS)" for ~4 images, no custom table)
-CPU frequency:    240MHz
-Arduino version:  ≥ 3.x (ESP32 core)
+USB CDC On Boot:  Enabled        ← required for Serial over native USB
+PSRAM:            OPI PSRAM      ← critical, must match the R8 chip
+Flash Size:       16MB
+Partition Scheme: Custom         ← uses wifi_rings_esp32s3/partitions.csv (~12.8 MB LittleFS, ~55 images)
+CPU Frequency:    240MHz
+Upload Speed:     921600         ← drop to 460800 if uploads are flaky
 ```
 
-Images are saved to a LittleFS partition. The `partitions.csv` in the sketch folder
-gives a ~12.8MB data partition (~55 images); select **Partition Scheme > Custom** to
-use it. With the default 1MB SPIFFS scheme you get ~4 images.
+Verify, then Upload. Open Serial Monitor at **115200**. A healthy first boot prints a banner, `PSRAM: 8388608 bytes total`, `LittleFS ready: … KB total`, and `=== ready ===`, then enters live view.
 
-## libraries
+### command-line flashing (what this repo is developed with)
 
-| library | version | notes |
-|---------|---------|-------|
-| Arduino_GFX_Library | latest | onboard display driver for this board |
-| esp32-camera | bundled with arduino-esp32 core | no install needed |
-| QRCode (ricmoo) | latest | SHARE-mode QR rendering — Library Manager: "QRCode" |
-| WiFi / WebServer / DNSServer / LittleFS | bundled with arduino-esp32 core | no install needed |
-
-## built-in display mapping
-
-The Waveshare ESP32-S3-Touch-LCD-2 vendor demos use this LCD map:
-
-```
-SCLK 39
-MOSI 38
-MISO 40
-DC   42
-CS   45
-RST  -1
-BL   1
+```bash
+CLI="<arduino-ide>/resources/app/lib/backend/resources/arduino-cli.exe"
+FQBN="esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=custom,FlashSize=16M,CDCOnBoot=cdc,CPUFreq=240,UploadSpeed=921600"
+"$CLI" compile --fqbn "$FQBN" wifi_rings_esp32s3
+"$CLI" upload  --fqbn "$FQBN" --port COM7 wifi_rings_esp32s3
 ```
 
-This repo now uses `Arduino_GFX_Library` directly with those pins.
+### if upload fails
 
-## camera mapping
-
-The Waveshare ESP32-S3-Touch-LCD-2 camera mapping used by this repo:
-
-```
-PWDN  17
-RESET -1
-XCLK   8
-SIOD  21
-SIOC  16
-Y9     2
-Y8     7
-Y7    10
-Y6    14
-Y5    11
-Y4    15
-Y3    13
-Y2    12
-VSYNC  6
-HREF   4
-PCLK   9
-```
-
-## microSD mapping — verified from the schematic
-
-The SD slot is SPI and **shares the LCD's SPI bus** (read off the
-[schematic](https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-2/ESP32-S3-Touch-LCD-2-SchDoc.pdf)):
-
-```
-IO38  LCD_MOSI / SD_MOSI     ← shared
-IO39  LCD_SCLK / SD_SCLK     ← shared
-IO40  SD_MISO                ← shared MISO line (LCD is write-only)
-IO41  SD_CS                  ← dedicated chip-select
-IO45  LCD_CS                 ← LCD chip-select (for reference)
-IO42  LCD_DC
-```
-
-**This is a shared bus, not a second SPI port.** The LCD and SD are two devices on
-*one* SPI bus, distinguished only by their CS lines (LCD_CS=45, SD_CS=41). You must
-**not** spin up a separate `SPIClass` on IO38/39/40 for the SD — a second SPI
-peripheral steals the pin routing from the display and breaks it, even with no card
-inserted. The SD has to be mounted on the same SPI instance Arduino_GFX drives.
-
-**Current status: SD is not used — storage is LittleFS** (internal flash), which
-avoids the shared bus entirely. The SD is a future capacity upgrade. When you wire
-it up (with hardware in hand to confirm live-view fps doesn't regress):
-
-1. Drive the LCD and SD from one shared `SPIClass` — e.g. switch the LCD databus
-   to `Arduino_HWSPI` on a `SPIClass` you `begin(39, 40, 38)`, then
-   `SD.begin(41, thatSpi)`. Both bracket their transfers in SPI transactions, so
-   they coexist on the bus, selected by CS.
-2. Point `save_png()` at `SD` instead of `LittleFS` (one-line change — same PNG
-   bytes, same lossless guarantee).
-
-## GPIO notes
-
-- GPIO0 is used for button input and sleep wake in this sketch.
-- Use BOOT intentionally during flashing; holding it changes boot mode.
-- The SD reuses the LCD's SPI pins (38/39/40); only CS (41) is its own — confirmed
-  against the schematic, no pin collision with the camera.
+Hold **BOOT**, tap **RESET**, release **BOOT**, upload again. If the port keeps dropping, lower the upload speed.
 
 ---
 
-## timing estimate (240MHz, OPI PSRAM @ 80MHz)
+## using it
+
+One button (a screen tap *or* GPIO0) drives three states. Press = short tap, hold = ≥ 0.8 s.
+
+**LIVE VIEW** — the camera streams to the display as a viewfinder.
+- **tap** → run the capture pipeline
+- **hold** → SHARE mode (the gallery)
+
+**RESULT VIEW** — the finished, ringed image is held on screen.
+- **tap** → back to live view
+- **hold** → SHARE mode
+
+**SHARE mode** — the device brings up an open Wi-Fi AP (`beacon-XXXX`) and shows **two QR codes**. See [getting images off the device](#getting-images-off-the-device).
+- **hold** → exit back to live view
+
+While the pipeline runs, a status label cycles through `capturing → scanning wifi → encoding rings → saving`, and a progress bar tracks the stages. Both vanish the instant the finished image appears.
+
+Captures are saved to internal flash as **`beacon_<seq>_<YYYYMMDD_HHMMSS>.png`** — a monotonic sequence number (the unique, sortable key) plus a timestamp. *The clock is anchored to firmware build time (the board has no RTC and never joins a network for time), so the date/time is approximate and resets on power-up; the sequence number is the source of truth for ordering.*
+
+> By default the device **never sleeps** (`ENABLE_SLEEP 0`) so re-flashing stays easy. Flip it to `1` for the production power-saving behaviour (10 s idle → light sleep, 60 s idle → deep sleep; deep sleep always wakes into live view).
+
+---
+
+## how the encoding works
+
+Short version below — **the full visual, step-by-step walkthrough is in [docs/ENCODING.md](docs/ENCODING.md)**, with images generated from the real encoder.
+
+Each capture carries the Wi-Fi scan in **two independent layers**:
+
+### 1. the artistic layer — `wifi_rings.c` (one-way)
+
+Concentric rings warp the frozen photo. One ring per network, **innermost = strongest signal**.
+
+- **The pattern is a direct readout of identity, not a hash.** Each network's `SSID + BSSID + channel` is concatenated, and every byte (0–255) is split into **two halves, each a value 0–15** (e.g. the letter `F` = value 70 = 4×16+6 → halves 4 and 6). Each half sets the **sort depth of one radial spoke**, tiled around the ring. Equal bytes always make equal-looking spokes — a "truth" you can eyeball — without being machine-readable.
+- **Signal strength sets the reach.** Stronger networks sort pixels deeper into their band (`reach = (dbm-window) × band width`). A spoke is a *radial pixel-sort*: it gathers pixels along a ray and reorders them by luminance, smearing the photo outward.
+
+This is a deliberately **one-way** visualisation — you cannot reconstruct the scan from the rings.
+
+### 2. the recoverable layer — `wifi_data.c` (exact, hidden)
+
+The *exact* scan is hidden in the **pixel least-significant-bits** as a framed, CRC-checked payload:
+
+```
+magic 'WBCN' | version | n_nets | per-net{ ssid_len, ssid, bssid[6], rssi, channel } | crc16
+```
+
+A ±1 nudge to the low bit of each colour channel is invisible against the rings but byte-exact to a decoder.
+
+**Ordering is what keeps the two layers from fighting:** the LSB embed runs **after** `rings_encode()`, so the pixel-sort can never overwrite the payload.
+
+```
+rings_encode(src → dst)        artistic layer, baked first
+        ↓
+data_embed_lsb(dst, payload)   hidden layer written last — rings can't touch it
+        ↓
+save_png(dst)                  lossless PNG (zlib "stored" blocks — no compression lib)
+```
+
+**The one hard rule: the image must stay lossless.** JPEG (or any lossy re-encode) throws away exactly the bits the payload lives in. The device saves PNG; never re-export as JPEG.
+
+---
+
+## getting images off the device
+
+### SHARE mode (no cable, no card reader)
+
+Hold the button in live or result view. The device opens an **open AP** and shows two QR codes:
+
+```
+            // BEACON SHARE
+        ┌──────────┐    ┌──────────┐
+        │   QR 1   │    │   QR 2   │
+        │ join AP  │    │ open URL │
+        └──────────┘    └──────────┘
+           1 JOIN          2 OPEN
+```
+
+1. **Scan QR 1** → your phone joins the `beacon-XXXX` network.
+2. **Scan QR 2 with the Camera app** → opens `192.168.4.1` in **real Safari/Chrome**.
+3. Browse the gallery: tap a thumbnail to **preview**, **press & hold an image → Save to Photos**, tick rows to **DELETE** or **DOWNLOAD** (multiple selected → one `.zip`).
+
+> **Why two QRs and why Safari?** iOS's captive-portal mini-browser blocks saving, downloads, and long-press. BEACON answers the OS connectivity probe as "online" so iOS *doesn't* trap you in that mini-browser — you use the real browser, where saving works natively. A `WIFI:` QR and an `http://` QR are different payload types, and you can't load the page until you're on the network, so they're inherently two scans. (First time on iOS you may need to "Forget" the network once so it re-probes.)
+
+The gallery is styled as a small OSINT terminal and shows a live storage gauge.
+
+### over USB (exact bytes, guaranteed)
+
+Pull the PNGs off LittleFS (e.g. an `esptool read_flash` + `littlefs-python` extraction, or a serial dump) and decode on a laptop:
+
+```bash
+pip install pillow numpy
+python tools/decode_beacon.py beacon_0001_20260628_145312.png      # table
+python tools/decode_beacon.py *.png --json                          # machine-readable
+```
+
+### the web decoder — `web/` (the OSINT view)
+
+`web/index.html` is a local, offline **signal-intelligence dashboard**. Drop a captured PNG on it and it reads the hidden payload right in the browser — no upload, nothing leaves the machine — and renders: network table ranked by signal, vendor lookup from the MAC OUI, channel occupancy, 2.4/5 GHz bands, rough distance estimate, and the raw frame bytes. (A WiGLE wardriving-geolocation panel is stubbed for a future online phase.)
+
+```bash
+cd web && python -m http.server     # then open http://localhost:8000
+```
+
+---
+
+## previewing the encoder without hardware
+
+`wifi_rings.c` is pure C with no Arduino dependencies, so the **exact device encoder** runs on a laptop. `tools/rings_preview.py` compiles it (via `python -m ziglang cc`) into a shared library and runs it over any photo with mock Wi-Fi data — instant visual tuning, no flashing.
+
+```bash
+pip install ziglang pillow numpy
+python tools/rings_preview.py                              # sample photo + mock networks
+python tools/rings_preview.py myphoto.jpg --ring-thickness 30 --max-displace 50
+python tools/rings_preview.py --sweep                      # 2×2 grid over all four sort modes
+```
+
+This is also what generates the figures in [docs/ENCODING.md](docs/ENCODING.md) — the previews are faithful because they run the same C the device runs.
+
+---
+
+## repo map
+
+```
+wifi_rings_esp32s3/            Arduino sketch — open THIS folder in the IDE
+  wifi_rings_esp32s3.ino         pipeline, state machine, camera, LittleFS save, clock, sleep
+  wifi_rings.h / .c              artistic encoder (one-way), pure C, no Arduino deps
+  wifi_data.h / .c               recoverable encoder: framing, CRC-16, LSB embed/extract
+  beacon_share.h / .cpp          SHARE mode: AP + two-QR screen + OSINT HTTP gallery
+  partitions.csv                 16 MB layout — ~12.8 MB LittleFS (~55 images)
+tools/                         host-side dev tools (run with python from repo root)
+  rings_preview.py               preview the real encoder on a photo → PNG
+  rings_host.c                   C shim binding wifi_rings.c into rings_preview.py
+  encoding_steps.py              generate the step-by-step figures for docs/ENCODING.md
+  decode_beacon.py               recover the hidden scan from a saved PNG/BMP
+  test_data_roundtrip.py         data-layer self-test (no hardware) → prints PASS
+  mock_wifi_networks.json        mock scan data for the preview tools
+web/                           offline browser OSINT decoder (drop a PNG, read the scan)
+docs/
+  ENCODING.md                    step-by-step visual explainer of the whole encoding
+  PORTFOLIO.md                   project narrative — the tools & ideas this combines
+sample-images/                 default photo(s) for the preview tools
+FIRST_FLASH.md                 first-flash checklist
+PROJECT_STATE.md               living status / bring-up notes
+```
+
+---
+
+## hardware reference
+
+### display (ST7789T3, landscape via rotation 1)
+
+```
+SCLK 39   MOSI 38   MISO 40   DC 42   CS 45   RST -1   BL 1
+```
+
+### camera (Waveshare ESP32-S3-Touch-LCD-2 map)
+
+```
+PWDN 17  RESET -1  XCLK 8  SIOD 21  SIOC 16
+Y9 2  Y8 7  Y7 10  Y6 14  Y5 11  Y4 15  Y3 13  Y2 12
+VSYNC 6  HREF 4  PCLK 9
+```
+
+> The data lines map to the OV2640 DVP bus as Y2..Y9, where **Y2 = D0 (LSB)** and **Y9 = D7 (MSB)**. Getting D0..D7 in the wrong order keeps timing/geometry perfect but **scrambles every colour** — a bit-permutation that preserves brightness. That was the original bring-up bug; the map above is correct.
+
+### touch (CST816, I²C0)
+
+```
+SDA 48   SCL 47   INT 46   addr 0x15
+```
+
+Used as a stand-in button (a tap = a press). The camera's SCCB owns I²C1, so touch deliberately uses I²C0 to avoid a port clash.
+
+### capture vs. save format
+
+- **Capture** (camera → RAM → live view) is **RGB565**. The OV2640 on this board produces no JPEG frames here (`esp_camera_fb_get()` times out), so RGB565 is used for the live source.
+- **Save** is always **lossless PNG**, because the recoverable payload lives in the pixel LSBs. Never save lossy.
+
+### microSD (future capacity upgrade — currently unused)
+
+The SD slot is SPI and **shares the LCD's bus** (`IO38 MOSI`, `IO39 SCLK`, `IO40 MISO` shared; `IO41` dedicated CS). It must mount on the *same* SPI instance the display driver uses — do **not** spin up a second `SPIClass` on those pins or you'll steal the routing and break the display. Storage stays on LittleFS until this is wired up; then `save_png()` repoints from `LittleFS` to `SD` (same PNG bytes).
+
+### memory layout
+
+```
+internal SRAM (~512 KB)        cos/sin LUT (8 KB, hot path) + DMA line buffers (must be internal)
+PSRAM (8 MB OPI)               g_src 230 KB + g_dst 230 KB (RGB888 frames) + camera framebuf
+```
+
+**The one rule:** big image buffers → PSRAM (`MALLOC_CAP_SPIRAM`); DMA transfer buffers → internal SRAM (`MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL`).
+
+### timing (240 MHz, OPI PSRAM)
 
 | step | estimate |
 |------|----------|
-| Live view frame rate | ~25–30 fps (GRAB_LATEST + quality 63 + 80MHz SPI) |
-| Capture settle | 100ms |
-| Camera capture (JPEG QVGA) | ~50ms |
-| fmt2rgb888 decode | ~10ms |
-| WiFi scan | 2–4s (hardware, unavoidable) |
-| rings_encode (5 networks) | ~50ms |
-| data_embed_lsb + self-extract | ~5ms |
-| save PNG to LittleFS (~230KB, stored deflate) | ~100–400ms (flash write) |
-| SPI blit ping-pong DMA | ~15ms |
-| **total pipeline after press** | **~3–5s** (WiFi scan dominates) |
+| live view | ~25–30 fps |
+| capture + decode | ~60 ms |
+| **Wi-Fi scan** | **2–4 s** (hardware, dominates) |
+| rings encode | ~50–70 ms |
+| LSB embed + self-check | ~5 ms |
+| save PNG (~230 KB) | ~0.1–4 s (flash write) |
+| **total after press** | **~3–8 s** |
 
 ---
 
-## RingConfig tuning for 320×240 @ ~150 PPI
+## license / status
 
-```c
-// minimum ring_thickness for visibility on physical screen: 14px
-// recommended starting point:
-inner_radius    = 18
-ring_thickness  = 22
-ring_gap        = 2
-max_displace    = 36   // strong signal: pixels drag this far
-min_displace    = 2    // weak signal: barely moves
-sort_dir        = 0    // 0=dark-inward  1=bright-inward  2=hue  3=sat
-disp_mode       = 0    // 0=radial (fastest, LUT-only)
-```
-
-## previewing on a PC (no hardware)
-
-`wifi_rings.c` is pure C with no Arduino deps, so the **exact** device encoder
-runs on a laptop. `rings_preview.py` compiles it (via `python -m ziglang cc`)
-into a shared library and runs it over a photo with mock WiFi data — instant
-visual tuning, no flashing.
-
-```
-pip install ziglang pillow numpy
-python tools/rings_preview.py                       # sample photo + mock_wifi_networks.json
-python tools/rings_preview.py myphoto.jpg
-python tools/rings_preview.py --ring-thickness 30 --max-displace 50
-python tools/rings_preview.py --sweep               # 2x2 grid over all four sort_dir modes
-```
-
-Output PNGs land in `output/`. The flags mirror `RingConfig`, so whatever looks
-good here is what to set in `RING_CONFIG_DEFAULT`. This is a faithful test — it's
-the same C the device runs (`rings_host.c` compiles `../wifi_rings_esp32s3/wifi_rings.c`).
-
-**Emulating the whole device (display + UI flow):** load the sketch into
-[Wokwi](https://wokwi.com) (ESP32-S3 + ST7789 in the browser) to exercise the
-screen layout, button taps/holds, sleep states, and the QR render. Wokwi has no
-camera or real WiFi scan, so stub those to test the UI; use `rings_preview.py`
-for the actual rings look.
-
-## files
-
-```
-wifi_rings_esp32s3/             Arduino sketch — open THIS folder in the IDE
-  wifi_rings_esp32s3.ino          pipeline, state machine, LittleFS save, sleep
-  wifi_rings.h / .c               artistic encode (one-way), pure C, no Arduino deps
-  wifi_data.h / .c                recoverable encode: framing, CRC16, LSB embed/extract
-  beacon_share.h / .cpp           SHARE mode: captive-portal SoftAP + QR + HTTP gallery
-  partitions.csv                  16MB layout — ~12.8MB LittleFS (~55 images)
-tools/                          host-side dev tools (run with python from repo root)
-  rings_preview.py                preview the real encoder on a photo, emit PNG
-  rings_host.c                    C shim binding wifi_rings.c into rings_preview.py
-  decode_beacon.py                recover the hidden scan from a saved PNG/BMP
-  test_data_roundtrip.py          data-layer self-test (no hardware)
-  mock_wifi_networks.json         mock scan data for rings_preview.py
-sample-images/                  default photo(s) for rings_preview.py
-output/                         generated previews + kept sample renders
-FIRST_FLASH.md                  first-flash checklist for this board
-README.md  TODO.md              docs
-```
+Personal project, in active bring-up — see [PROJECT_STATE.md](PROJECT_STATE.md) for the current confirmed-working state and open items. Enclosure files and a few docs are still landing.
