@@ -65,16 +65,8 @@
 static_assert(sizeof(Pixel) == 3, "Pixel struct must be 3 bytes packed");
 
 // ─── timing ───────────────────────────────────────────────────────────────────
-#define IDLE_LIGHT_SLEEP_MS   10000UL   // 10s idle → light sleep
-#define IDLE_DEEP_SLEEP_MS    60000UL   // 60s idle → deep sleep
 #define CAPTURE_SETTLE_MS     100       // ms to let camera settle before fresh capture
-
-// ─── sleep enable (development) ───────────────────────────────────────────────
-// 0 = device stays fully awake in live/result view (no light or deep sleep).
-//     Deep sleep powers the board off — backlight off, USB CDC drops, and it
-//     only wakes via a full reboot, which makes development + re-flashing painful.
-// 1 = production power saving (the 10s light / 60s deep behaviour above).
-#define ENABLE_SLEEP  0
+#define IDLE_NAP_MS           45000UL   // idle before the screen + camera nap (double-tap wakes)
 
 // ─── pin assignments ──────────────────────────────────────────────────────────
 // Waveshare ESP32-S3-Touch-LCD-2 built-in display and camera mappings.
@@ -226,31 +218,6 @@ static void fatal(const char* msg) {
     while (true) delay(1000);
 }
 
-// ─── sleep helpers ────────────────────────────────────────────────────────────
-#if ENABLE_SLEEP
-
-// Light sleep: CPU pauses, PSRAM + camera XCLK stay powered.
-// Returns when GPIO0 falls (button press). Wake is ~2ms.
-static void enter_light_sleep() {
-    Serial.println("light sleep");
-    // GPIO wakeup works in light sleep (unlike EXT0 which is deep-sleep only)
-    gpio_wakeup_enable((gpio_num_t)PIN_BUTTON, GPIO_INTR_LOW_LEVEL);
-    esp_sleep_enable_gpio_wakeup();
-    esp_light_sleep_start();
-    // execution resumes here after wake
-    gpio_wakeup_disable((gpio_num_t)PIN_BUTTON);
-    Serial.println("wake (light)");
-}
-
-// Deep sleep: full power-off. Wake triggers full reboot → setup() → LIVE VIEW.
-static void enter_deep_sleep() {
-    Serial.println("deep sleep");
-    esp_deep_sleep_start();
-    // never returns
-}
-
-#endif  // ENABLE_SLEEP
-
 // ─── capacitive touch ─────────────────────────────────────────────────────────
 // Polls the CST816 over I2C; a finger on the panel reads as a button press.
 static bool g_touch_ok = false;
@@ -329,6 +296,60 @@ static Press poll_press() {   // Press enum is defined up in the state section
 // Returns 0 = none, 1 = short, 2 = long — matches Press::{NONE,SHORT,LONG}.
 static int share_poll_press() {
     return (int)poll_press();
+}
+
+// ─── nap (battery save) ───────────────────────────────────────────────────────
+// After IDLE_NAP_MS with no input, the backlight + camera power down and the CPU
+// light-sleeps — a few mA instead of ~100. A DOUBLE-TAP wakes it; a single stray
+// touch just re-naps. Touch can wake LIGHT sleep because its INT line (GPIO46) is
+// a valid light-sleep GPIO wake source. It is NOT an RTC pin, so true DEEP sleep
+// could not be woken by touch on this board — which is why we nap, not deep-sleep.
+#define DBLTAP_GAP_MS  500    // max gap between the first and second tap
+#define TAP_MAX_MS     700    // a press longer than this is a hold, not a tap
+
+// The touch that wakes us is "tap 1". Returns true iff a quick second tap follows.
+static bool woke_on_double_tap() {
+    unsigned long t = millis();
+    while (button_pressed()) {                  // wait for tap 1 to release
+        if (millis() - t > TAP_MAX_MS) { wait_release(); return false; }  // a hold, ignore
+        delay(5);
+    }
+    t = millis();
+    while (millis() - t < DBLTAP_GAP_MS) {      // watch for tap 2
+        if (button_pressed()) { wait_release(); return true; }
+        delay(5);
+    }
+    return false;
+}
+
+static void enter_nap() {
+    Serial.println("nap (double-tap to wake)");
+    digitalWrite(LCD_BL, LOW);                  // backlight off — the biggest single draw
+    pinMode(CAM_PWDN, OUTPUT);
+    digitalWrite(CAM_PWDN, HIGH);               // OV2640 → standby (registers retained)
+
+    esp_sleep_enable_gpio_wakeup();
+    do {
+        wait_release();                         // never sleep while held (would wake instantly)
+        gpio_wakeup_enable((gpio_num_t)TP_INT,     GPIO_INTR_LOW_LEVEL);  // touch INT, active-low
+        gpio_wakeup_enable((gpio_num_t)PIN_BUTTON, GPIO_INTR_LOW_LEVEL);  // BOOT button too
+        esp_light_sleep_start();                // sleeps here until a touch pulls INT low
+        gpio_wakeup_disable((gpio_num_t)TP_INT);
+        gpio_wakeup_disable((gpio_num_t)PIN_BUTTON);
+    } while (!woke_on_double_tap());            // single/stray touch → back to sleep
+
+    digitalWrite(CAM_PWDN, LOW);                // camera out of standby
+    delay(40);
+    digitalWrite(LCD_BL, HIGH);                 // screen back on
+    Serial.println("wake (double-tap)");
+
+    // guard: ignore input for ~1s after waking so a third quick tap (part of a
+    // rapid double/triple-tap) doesn't immediately fire the capture pipeline.
+    unsigned long t = millis();
+    while (millis() - t < 1000) {
+        if (button_pressed()) wait_release();   // swallow taps during the guard
+        delay(10);
+    }
 }
 
 // ─── camera init ──────────────────────────────────────────────────────────────
@@ -618,12 +639,11 @@ static bool save_png(const Pixel* img, char* out_path, size_t path_len) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  LIVE VIEW
 //  Streams camera to display. Returns when button is pressed.
-//  Manages light sleep (10s) and deep sleep (60s) on idle.
+//  After IDLE_NAP_MS with no input it naps (screen+camera off); double-tap wakes.
 // ─────────────────────────────────────────────────────────────────────────────
 static void run_live_view() {
     Serial.println("live view");
     unsigned long last_activity = millis();
-    (void)last_activity;
 
     while (true) {
         // ── grab + blit frame ────────────────────────────────────────────────
@@ -644,22 +664,16 @@ static void run_live_view() {
             continue;
         }
 
-#if ENABLE_SLEEP
-        // ── idle timers ──────────────────────────────────────────────────────
-        unsigned long idle = millis() - last_activity;
-
-        if (idle >= IDLE_DEEP_SLEEP_MS) {
-            enter_deep_sleep();  // never returns
+        // ── idle → nap (battery save); a double-tap wakes it ──────────────────
+        // Never nap while tethered to a computer: light sleep suspends the USB
+        // and breaks the flashing auto-reset, and on a tether there's nothing to
+        // save. `Serial` (USB CDC) is truthy only when a host has the port.
+        if (Serial) {
+            last_activity = millis();    // tethered: stay awake, re-arm for unplug
+        } else if (millis() - last_activity >= IDLE_NAP_MS) {
+            enter_nap();                 // blocks until a double-tap wakes it
+            last_activity = millis();    // reset timer after wake
         }
-
-        if (idle >= IDLE_LIGHT_SLEEP_MS) {
-            enter_light_sleep();  // returns on button press
-            // After light sleep wake: debounce, wait release, then back to live view
-            delay(30);
-            wait_release();
-            last_activity = millis();  // reset timer after wake
-        }
-#endif
     }
 }
 
@@ -765,12 +779,11 @@ static bool run_pipeline() {
 //  RESULT VIEW
 //  Holds encoded image on screen.
 //  Short press → return to live view.  Long press (≥800ms) → SHARE mode.
-//  10s idle → light sleep. 60s idle → deep sleep.
+//  After IDLE_NAP_MS with no input it naps; a double-tap wakes back to the result.
 // ─────────────────────────────────────────────────────────────────────────────
 static void run_result_view() {
     Serial.println("result view (tap = live view, hold = share/QR)");
     unsigned long last_activity = millis();
-    (void)last_activity;
 
     while (true) {
         // ── button: tap → live view, hold → share mode ────────────────────────
@@ -783,21 +796,15 @@ static void run_result_view() {
             return;                       // exit share → live view
         }
 
-#if ENABLE_SLEEP
-        unsigned long idle = millis() - last_activity;
-
-        if (idle >= IDLE_DEEP_SLEEP_MS) {
-            enter_deep_sleep();  // never returns
+        // ── idle → nap; a double-tap wakes back to the result image ──────────
+        // (skipped while USB-tethered — see run_live_view for why)
+        if (Serial) {
+            last_activity = millis();
+        } else if (millis() - last_activity >= IDLE_NAP_MS) {
+            enter_nap();
+            blit_frame(g_dst);           // restore the result we were viewing
+            last_activity = millis();
         }
-
-        if (idle >= IDLE_LIGHT_SLEEP_MS) {
-            enter_light_sleep();  // returns on button press
-            delay(30);
-            wait_release();
-            // Button press in result view → go back to live view
-            return;
-        }
-#endif
 
         delay(10);
     }
@@ -852,10 +859,9 @@ void setup() {
     // skips the save step in the pipeline.
     storage_init();
 
-    // ── deep sleep wake config ────────────────────────────────────────────────
-    // EXT0 wakes on GPIO0 LOW (button press). Used for deep sleep only.
-    // Light sleep uses gpio_wakeup instead (configured per-sleep in helper).
-    esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_BUTTON, 0);
+    // Sleep is a touch-wakeable LIGHT-sleep "nap" (see enter_nap) — no deep-sleep
+    // wake config needed: the touch INT (GPIO46) isn't an RTC pin, so deep sleep
+    // couldn't be woken by touch anyway.
 
     Serial.printf("free heap: %d  free PSRAM: %d\n",
                   ESP.getFreeHeap(), ESP.getFreePsram());
