@@ -45,19 +45,23 @@ typedef struct {
     uint8_t inner_radius;     // px — inner edge of ring 0
     uint8_t ring_thickness;   // px — radial depth of each ring band
     uint8_t ring_gap;         // px — gap between rings
-    uint8_t max_displace;     // px — max source displacement (strong signal)
-    uint8_t min_displace;     // px — min source displacement (weak signal)
+    uint8_t max_displace;     // smear as % of band width, strongest signal (≤100)
+    uint8_t min_displace;     // smear as % of band width, weakest signal
     uint8_t sort_dir;         // 0=lum_asc  1=lum_desc  2=hue  3=sat
     uint8_t disp_mode;        // 0=radial  1=angular  2=both
 } RingConfig;
 
-// Sensible defaults for 320×240 at ~150 PPI
+// Sensible defaults for 320×240 at ~150 PPI.
+// The smear is contained within each ring band (no overflow). Signal strength
+// fills the band from min_displace% (weak) up to max_displace% (strong). Wider
+// bands + a gap give the smear room to read; per-ray detail comes from the
+// network fingerprint hash.
 static const RingConfig RING_CONFIG_DEFAULT = {
-    .inner_radius   = 18,
-    .ring_thickness = 22,
-    .ring_gap       = 2,
-    .max_displace   = 36,
-    .min_displace   = 2,
+    .inner_radius   = 14,
+    .ring_thickness = 30,    // also the max sort depth (hex F at full signal)
+    .ring_gap       = 0,     // bands touch — continuous concentric field
+    .max_displace   = 100,   // strongest signal: hex F = full band (no overflow)
+    .min_displace   = 10,    // weakest still shows a thin smear
     .sort_dir       = 0,
     .disp_mode      = 0,
 };

@@ -12,3 +12,7 @@ librings_host.so
 *.o
 # output/ holds generated images only — regenerate via the tools, never tracked
 output/
+# debug debris — kept for local iteration, cleaned up before release
+tools/mock_*.json
+tools/show_strings.py
+sample-images/testgrad.png
