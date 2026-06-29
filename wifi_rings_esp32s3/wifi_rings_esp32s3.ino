@@ -49,6 +49,8 @@
 #include <esp_heap_caps.h>
 #include <esp_sleep.h>
 #include <driver/gpio.h>
+#include <time.h>
+#include <sys/time.h>
 #include <Arduino_GFX_Library.h>
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -171,6 +173,7 @@ RingConfig g_cfg = RING_CONFIG_DEFAULT;
 
 // ─── storage state ──────────────────────────────────────────────────────────────
 bool        g_fs_ok = false;            // set in setup(); false → save step skipped
+bool        g_storage_full = false;     // set by save_png when the FS can't fit another image
 Preferences g_prefs;                    // persists the shot counter across reboots
 uint8_t     g_payload[WBCN_MAX_FRAME];  // framed scan data, embedded into LSBs
 
@@ -196,20 +199,19 @@ static void progress_bar(int stage) {
 }
 
 // ─── centered text overlay on top of whatever is on screen ───────────────────
-// Dark pill behind white text — readable over any image content.
+// Dark pill behind white text — readable over any image content. The pill is a
+// fixed width so a shorter status label fully overwrites a longer previous one
+// (the pipeline cycles through "capturing.../scanning.../encoding.../saving...").
 static void overlay_text(const char* msg) {
-    const int pad_x = 10, pad_y = 5;
     const int cw = 6, ch = 8;
-    const int len = strlen(msg);
-    const int tw = len * cw;
-    const int bw = tw + pad_x * 2;
-    const int bh = ch + pad_y * 2;
+    const int bw = 180, bh = ch + 10;            // fixed pill — covers any label
     const int bx = (IMG_W - bw) / 2;
     const int by = (IMG_H - bh) / 2;
+    const int tw = (int)strlen(msg) * cw;
     tft->fillRect(bx, by, bw, bh, COLOR_BLACK);
     tft->setTextColor(COLOR_WHITE, COLOR_BLACK);
     tft->setTextSize(1);
-    tft->setCursor(bx + pad_x, by + pad_y);
+    tft->setCursor(bx + (bw - tw) / 2, by + 5);  // center the text within the pill
     tft->print(msg);
 }
 
@@ -320,6 +322,13 @@ static Press poll_press() {   // Press enum is defined up in the state section
         delay(5);
     }
     return Press::SHORT;
+}
+
+// Adapter so SHARE mode (a separate translation unit, no access to the static
+// touch helpers here) can use the exact same touch+GPIO0 long-press detection.
+// Returns 0 = none, 1 = short, 2 = long — matches Press::{NONE,SHORT,LONG}.
+static int share_poll_press() {
+    return (int)poll_press();
 }
 
 // ─── camera init ──────────────────────────────────────────────────────────────
@@ -453,6 +462,28 @@ static void do_wifi_scan() {
 
 // ─── storage: SD + persistent shot counter ─────────────────────────────────────
 
+// Anchor the system clock to firmware BUILD time. The board has no RTC battery
+// and we never join a network for NTP (WiFi is scan-only / AP-only), so this is
+// the best wall-clock available offline: timestamps are approximate and reset to
+// build time on every power-up. The persisted seq prefix (next_seq) is the real
+// unique, monotonic ordering key — the date/time is human context on top of it.
+static void clock_init() {
+    static const char* months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    char mon[4] = {0};
+    int day = 1, year = 2025, hh = 0, mm = 0, ss = 0;
+    sscanf(__DATE__, "%3s %d %d", mon, &day, &year);   // e.g. "Jun 28 2026"
+    sscanf(__TIME__, "%d:%d:%d", &hh, &mm, &ss);        // e.g. "14:53:12"
+    const char* p = strstr(months, mon);
+    struct tm t = {};
+    t.tm_year = year - 1900;
+    t.tm_mon  = p ? (int)(p - months) / 3 : 0;
+    t.tm_mday = day;
+    t.tm_hour = hh; t.tm_min = mm; t.tm_sec = ss;
+    struct timeval tv = { .tv_sec = mktime(&t), .tv_usec = 0 };
+    settimeofday(&tv, nullptr);
+    Serial.printf("clock anchored to build time: %s %s\n", __DATE__, __TIME__);
+}
+
 static void storage_init() {
     g_prefs.begin("beacon", false);     // RW namespace for the shot counter
     // formatOnFail = true: first boot on a fresh partition gets formatted once.
@@ -508,11 +539,28 @@ static void png_chunk(File& f, const char* type, const uint8_t* data, uint32_t l
 static bool save_png(const Pixel* img, char* out_path, size_t path_len) {
     if (!g_fs_ok) return false;
 
-    const uint32_t seq = next_seq();
-    snprintf(out_path, path_len, "/beacon_%04u.png", (unsigned)seq);
-
     const uint32_t rowlen = 1u + (uint32_t)IMG_W * 3;       // filter byte + RGB
     const uint32_t rawlen = rowlen * (uint32_t)IMG_H;
+
+    // PNG "stored" blocks are uncompressed, so the file is ~rawlen on disk. If
+    // there isn't room for another image, skip the save and flag it so the UI can
+    // tell the user to free space via share mode (download + delete on the phone).
+    if (LittleFS.totalBytes() - LittleFS.usedBytes() < rawlen + 8192) {
+        Serial.println("png: storage full — save skipped");
+        g_storage_full = true;
+        return false;
+    }
+    g_storage_full = false;
+
+    const uint32_t seq = next_seq();
+    time_t now = time(nullptr);
+    struct tm tinfo;
+    localtime_r(&now, &tinfo);
+    char ts[20];
+    strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tinfo);  // 20260628_145312
+    // seq first → files stay uniquely named and chronologically sortable even
+    // across reboots (when the build-time clock resets); date/time is readable context.
+    snprintf(out_path, path_len, "/beacon_%04u_%s.png", (unsigned)seq, ts);
 
     uint8_t* raw = (uint8_t*)heap_caps_malloc(rawlen, MALLOC_CAP_SPIRAM);
     if (!raw) { Serial.println("png: PSRAM alloc failed"); return false; }
@@ -584,8 +632,16 @@ static void run_live_view() {
         }
 
         // ── button check ─────────────────────────────────────────────────────
-        if (poll_button()) {
+        // short tap → run the capture pipeline; long press → QR / share mode,
+        // then resume live view when it returns.
+        Press p = poll_press();
+        if (p == Press::SHORT) {
             return;  // caller will run pipeline
+        }
+        if (p == Press::LONG) {
+            run_share_mode(tft, share_poll_press);
+            last_activity = millis();
+            continue;
         }
 
 #if ENABLE_SLEEP
@@ -622,6 +678,7 @@ static bool run_pipeline() {
     sensor_t* s = esp_camera_sensor_get();
     if (s) s->set_quality(s, 12);
 
+    overlay_text("capturing...");   // over the last live frame
     delay(CAPTURE_SETTLE_MS);
     progress_bar(1);
     if (!grab_frame(g_src)) {
@@ -654,6 +711,7 @@ static bool run_pipeline() {
 
     // ── 3. Encode rings (artistic layer) + embed data layer ───────────────────
     progress_bar(3);
+    overlay_text("encoding rings...");
     if (g_n_nets == 0) {
         memcpy(g_dst, g_src, IMG_PIXELS * sizeof(Pixel));
     } else {
@@ -678,17 +736,26 @@ static bool run_pipeline() {
 
     // ── 4. Save lossless PNG (JPEG would destroy the LSB payload) ──────────────
     progress_bar(4);
-    char path[24];
+    overlay_text("saving...");
+    char path[40];
     if (save_png(g_dst, path, sizeof(path)))
         Serial.printf("[%lu ms] saved %s\n", millis() - t0, path);
     else
         Serial.println("save skipped (no filesystem)");
 
     // ── 5. Blit result ───────────────────────────────────────────────────────
-    progress_bar(5);
+    // The full-frame blit overwrites both the progress bar and the status pill,
+    // so the loading UI simply vanishes the instant the finished image appears.
     blit_frame(g_dst);
-    // Redraw full bar over image (blit overwrites it)
-    progress_bar(PROGRESS_STAGES);
+
+    // Result view never redraws, so this banner stays put until the next capture.
+    if (g_storage_full) {
+        tft->fillRect(0, 0, IMG_W, 12, COLOR_RED);
+        tft->setTextColor(COLOR_WHITE, COLOR_RED);
+        tft->setTextSize(1);
+        tft->setCursor(4, 2);
+        tft->print("STORAGE FULL - hold to share & free space");
+    }
     Serial.printf("[%lu ms] total\n", millis() - t0);
 
     return true;
@@ -712,7 +779,7 @@ static void run_result_view() {
             return;                       // back to live view
         }
         if (p == Press::LONG) {
-            run_share_mode(tft, PIN_BUTTON);   // AP + QR + gallery; blocks until press
+            run_share_mode(tft, share_poll_press);  // AP + QR + gallery; long-press to exit
             return;                       // exit share → live view
         }
 
@@ -776,6 +843,9 @@ void setup() {
 
     // ── camera ───────────────────────────────────────────────────────────────
     if (!camera_init()) fatal("camera init failed");
+
+    // ── clock (build-time anchored — no RTC/NTP offline) ──────────────────────
+    clock_init();
 
     // ── storage ──────────────────────────────────────────────────────────────
     // Non-fatal: if the filesystem won't mount, the device still runs — it just
