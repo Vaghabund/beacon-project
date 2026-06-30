@@ -1,14 +1,18 @@
 # Project State — wifi_rings (ESP32-S3 beacon)
 
-_Last updated: 2026-06-21 — laptop bring-up session._
-_Branch: `fix/laptop-bringup-touch-camera`._
+_Last updated: 2026-06-30 — docs/caveat pass (post battery-nap rewrite)._
+_Branch: `main`._
 
 ## TL;DR
 
 The firmware builds, flashes, and runs on the Waveshare ESP32-S3-Touch-LCD-2.
 Live camera (correct colour), touch-as-button, the capture pipeline, repeatable
 WiFi scans, and lossless **PNG** save all work. Camera colour, the failed
-first-tap, and the empty-rescan bugs are fixed (see below).
+first-tap, and the empty-rescan bugs are fixed (see below). Sleep is now a
+single battery-saving "nap" tier (double-tap wake), not the old light/deep
+split — see the toolchain section below. SHARE mode (the only way images leave
+the device) is implemented but not yet confirmed end-to-end on hardware — see
+"Known issues" below before calling this finished.
 
 ## Toolchain (what actually builds it)
 
@@ -32,9 +36,11 @@ first-tap, and the empty-rescan bugs are fixed (see below).
 - **Touch = button**: CST816D on **I2C0** (GPIO47=SCL, GPIO48=SDA, addr 0x15),
   OR'd with GPIO0 so a soldered BOOT button still works later. (Camera SCCB
   owns I2C1, so touch deliberately uses I2C0 to avoid a port clash.)
-- **No-sleep dev mode** (`ENABLE_SLEEP 0`): stays awake, backlight on, USB CDC
-  stays connected — makes re-flashing reliable. Set to `1` for production power
-  saving. The deep-sleep behaviour caused recurring trouble; keep it off in dev.
+- **Battery-saving nap** (45s idle → light sleep, screen+camera off; double-tap
+  wakes). Replaced the earlier `ENABLE_SLEEP` dev/prod toggle and two-tier
+  light/deep sleep — there's now one sleep tier, always on. It's automatically
+  skipped while USB-tethered (`Serial` truthy), which is what keeps re-flashing
+  reliable, so there's no separate dev-mode flag to remember to flip back.
 - **Camera capture** (RGB565, correct colour) + full pipeline: WiFi scan →
   rings encode → LSB data embed → lossless PNG save.
 
@@ -59,10 +65,11 @@ first-tap, and the empty-rescan bugs are fixed (see below).
 
 ## Known issues / TODO (next session)
 
-- **Touch can't exit SHARE mode.** `beacon_share.cpp` polls GPIO0 directly (it's
-  a separate translation unit and can't see the touch helper). For now use
-  **short taps**; a long-hold enters the QR screen and you'd need GPIO0 to leave.
-  Fix: expose the touch check to share mode.
+- **SHARE mode is not yet confirmed end-to-end on hardware.** The capture
+  pipeline, scan, rings, and PNG save are all verified on the board; the
+  QR-scan → AP-join → captive-portal → gallery → download/save flow is not.
+  Since SHARE mode is the only way images leave the device, this is the top
+  thing to verify before calling the project done.
 - The onboard **BOOT button (GPIO0) did not respond** when pressed by hand —
   worth checking; touch is the working input for now.
 - **Minor diagnostics remain** — `camera sensor: PID=...` in `camera_init()` and
@@ -70,8 +77,22 @@ first-tap, and the empty-rescan bugs are fixed (see below).
 - **Ring look** — the artistic rings tile the SSID-as-digits around each ring, so
   the motif repeats; the full recoverable data is in the LSB layer, not the rings.
   Possible cosmetic change: stretch the SSID once around the ring instead.
-- **Docs are stale**: `FIRST_FLASH.md` step 4 + `README.md` still say install the
-  "QRCode" library (no longer used) and "core ≥ 3.x" (should pin 3.1.3).
+- **SHARE mode has no authentication** (open AP, no login) — deliberate, for
+  zero-friction phone pairing, but it means anyone in range while SHARE mode is
+  up can view/download/delete every saved capture. Documented in README; no
+  code change planned unless that tradeoff stops being acceptable.
+
+### Fixed since the bring-up session above (not yet re-verified on hardware)
+
+- **Touch can exit SHARE mode now.** `beacon_share.cpp` takes a `share_poll_press`
+  callback (wired to the shared touch+GPIO0 long-press logic in the `.ino`)
+  instead of polling GPIO0 directly — the long-press-to-exit gesture works the
+  same as everywhere else. Worth a quick hardware confirm, but the code-level
+  issue described in an earlier version of this doc is resolved.
+- **WiFi scan results are now ranked by RSSI before the `MAX_NETWORKS` cap.**
+  `WiFi.scanNetworks()` doesn't return signal-sorted results, so in a dense area
+  (>12 visible APs) the device could previously keep weaker networks over
+  stronger ones purely due to scan-enumeration order. Fixed in `do_wifi_scan()`.
 
 ## Capture format vs save format — the "PNG for a reason"
 

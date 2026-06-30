@@ -8,28 +8,32 @@
 //    One push button — GPIO0, active LOW, also wake source
 //
 //  Workflow:
-//    deep sleep → wake → LIVE VIEW (always, never wakes into result)
+//    boot → LIVE VIEW
 //
 //    LIVE VIEW
 //      lightweight JPEG→blit loop, no processing overhead
-//      button press → 100ms settle → fresh capture → PIPELINE
-//      10s no press  → light sleep (XCLK running, ~2ms wake)
-//      60s no press  → deep sleep  (~300ms wake, full reboot)
+//      tap            → 100ms settle → fresh capture → PIPELINE
+//      hold (≥800ms)  → SHARE mode (AP + QR + gallery), then back to LIVE VIEW
+//      45s no input   → nap (screen + camera off); double-tap wakes back here
+//      never naps while USB-tethered (Serial truthy) — see enter_nap()
 //
 //    PIPELINE
 //      freeze frame → WiFi scan → encode rings → blit result → RESULT VIEW
 //
 //    RESULT VIEW
 //      holds encoded image on screen
-//      button press → LIVE VIEW (resets timers)
-//      10s no press  → light sleep (XCLK running)
-//      60s no press  → deep sleep
+//      tap            → LIVE VIEW
+//      hold (≥800ms)  → SHARE mode, then exits to LIVE VIEW
+//      45s no input   → nap; double-tap wakes back to the held result image
 //
 //  Sleep notes:
-//    Light sleep: CPU paused, PSRAM + peripherals alive, XCLK keeps running.
-//      Wake source: GPIO0 falling edge. Resume is ~2ms.
-//    Deep sleep: full power-off. Wake source: GPIO0 falling edge (EXT0).
-//      Resume is a full reboot (~300ms), always enters LIVE VIEW.
+//    One sleep tier only: LIGHT sleep ("nap"). CPU paused, PSRAM + peripherals
+//    alive, XCLK keeps running. Wake source: touch INT (GPIO46) or GPIO0,
+//    falling edge. Resume is ~2ms; a DOUBLE-TAP within 500ms confirms the
+//    wake (a single stray touch just re-naps). No reboot, no state loss.
+//    No deep-sleep tier: the touch controller's INT line is not an RTC-capable
+//    pin, so deep sleep could not be touch-woken on this board — that's why
+//    there's a nap tier instead of a deep-sleep tier. See enter_nap().
 //
 //  Arduino IDE settings:
 //    Board:            ESP32S3 Dev Module
@@ -448,6 +452,13 @@ static bool grab_frame(Pixel* dst) {
 }
 
 // ─── wifi scan ────────────────────────────────────────────────────────────────
+// WiFi.scanNetworks() does NOT return results sorted by signal strength — order
+// is whatever the radio's channel-by-channel scan happened to enumerate. A scan
+// is ranked by RSSI here, BEFORE truncating to MAX_NETWORKS, so a dense area
+// (more visible APs than MAX_NETWORKS) keeps the actually-strongest networks
+// instead of whichever ones the scan happened to list first.
+#define WIFI_SCAN_RANK_MAX 64   // cap on how many raw results we rank (plenty for any realistic scan)
+
 static void do_wifi_scan() {
     // The first scan after a cold radio start often returns a negative error
     // (WIFI_SCAN_FAILED = -2) or 0 — that was the "failed first scan". Retry a
@@ -460,8 +471,20 @@ static void do_wifi_scan() {
         found = WiFi.scanNetworks(false, true);
     }
     if (found < 0) found = 0;
+
+    // Rank raw scan indices by RSSI, strongest first (insertion sort — n is small).
+    int n_rank = found < WIFI_SCAN_RANK_MAX ? found : WIFI_SCAN_RANK_MAX;
+    int order[WIFI_SCAN_RANK_MAX];
+    for (int i = 0; i < n_rank; i++) order[i] = i;
+    for (int i = 1; i < n_rank; i++) {
+        int tmp = order[i], j = i - 1;
+        while (j >= 0 && WiFi.RSSI(order[j]) < WiFi.RSSI(tmp)) { order[j + 1] = order[j]; j--; }
+        order[j + 1] = tmp;
+    }
+
     g_n_nets = 0;
-    for (int i = 0; i < found && g_n_nets < MAX_NETWORKS; i++) {
+    for (int k = 0; k < n_rank && g_n_nets < MAX_NETWORKS; k++) {
+        const int i = order[k];
         strncpy(g_nets[g_n_nets].ssid, WiFi.SSID(i).c_str(), MAX_SSID_LEN - 1);
         g_nets[g_n_nets].ssid[MAX_SSID_LEN - 1] = '\0';
         g_nets[g_n_nets].dbm     = (int8_t)WiFi.RSSI(i);
@@ -519,7 +542,7 @@ static void storage_init() {
     }
 }
 
-// Monotonic shot index persisted in NVS — survives reboots and deep sleep.
+// Monotonic shot index persisted in NVS — survives reboots.
 static uint32_t next_seq() {
     uint32_t s = g_prefs.getUInt("seq", 0);
     g_prefs.putUInt("seq", s + 1);
@@ -811,7 +834,8 @@ static void run_result_view() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  setup — runs on every boot (including deep sleep wake)
+//  setup — runs once at power-on. Nap (enter_nap) is a blocking light-sleep
+//  call inside loop()'s state machine, not a reboot — setup() does not re-run.
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
@@ -869,11 +893,13 @@ void setup() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  loop — state machine, runs after every boot (deep sleep wake = fresh boot)
+//  loop — state machine. Runs once after setup() and never returns: the
+//  while(true) below is the whole program, so the Arduino runtime never calls
+//  loop() a second time. Nap blocks inside run_live_view()/run_result_view()
+//  and resumes in place — it does not unwind back to here.
 // ─────────────────────────────────────────────────────────────────────────────
 void loop() {
-    // Always start in LIVE VIEW — no edge cases from sleeping in result view
-    g_state = AppState::LIVE_VIEW;
+    g_state = AppState::LIVE_VIEW;   // always start in LIVE VIEW at power-on
 
     while (true) {
         switch (g_state) {

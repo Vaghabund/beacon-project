@@ -25,12 +25,6 @@ static inline float lsin(int ai, int total) {
     return g_sin[((int64_t)ai * LUT_SIZE / total) & LUT_MASK];
 }
 
-// Weakest network in the scan maps to this reach fraction.
-// Strongest always maps to 1.0. Everything in between is linear — so the
-// relative gap between any two networks is always preserved, and even the
-// weakest ring still shows a visible smear.
-#define SIG_T_FLOOR 0.2f
-
 // ─────────────────────────────────────────────
 //  Sort keys
 // ─────────────────────────────────────────────
@@ -181,12 +175,6 @@ void rings_encode(
     const float cx   = IMG_W * 0.5f;
     const float cy   = IMG_H * 0.5f;
     const float maxr = (IMG_W < IMG_H ? IMG_W : IMG_H) * 0.90f;
-
-    // absolute signal mapping: -100 dBm → 0.0, -30 dBm → 1.0
-    // original formula — use to compare against scan-relative (SIG_T_FLOOR) approach
-    const float dbm_max   = (float)nets[0].dbm;
-    const float dbm_min   = (float)nets[n_nets > 0 ? n_nets - 1 : 0].dbm;
-    const float dbm_range = dbm_max - dbm_min;
 
     // stack-allocated working buffers — reused every ray, zero heap
     SE      ray_buf[MAX_RAY_LEN];

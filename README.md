@@ -106,7 +106,7 @@ While the pipeline runs, a status label cycles through `capturing → scanning w
 
 Captures are saved to internal flash as **`beacon_<seq>_<YYYYMMDD_HHMMSS>.png`** — a monotonic sequence number (the unique, sortable key) plus a timestamp. *The clock is anchored to firmware build time (the board has no RTC and never joins a network for time), so the date/time is approximate and resets on power-up; the sequence number is the source of truth for ordering.*
 
-> By default the device **never sleeps** (`ENABLE_SLEEP 0`) so re-flashing stays easy. Flip it to `1` for the production power-saving behaviour (10 s idle → light sleep, 60 s idle → deep sleep; deep sleep always wakes into live view).
+> The device naps automatically to save power: after 45 s idle the backlight and camera power down and the CPU light-sleeps (a few mA). A **double-tap** wakes it back to where it was (live view, or the held result image) — a single stray touch just re-naps. It never naps while USB-tethered, since light sleep would suspend the USB connection and break re-flashing.
 
 ---
 
@@ -171,6 +171,8 @@ Hold the button in live or result view. The device opens an **open AP** and show
 > **Why two QRs and why Safari?** iOS's captive-portal mini-browser blocks saving, downloads, and long-press. BEACON answers the OS connectivity probe as "online" so iOS *doesn't* trap you in that mini-browser — you use the real browser, where saving works natively. A `WIFI:` QR and an `http://` QR are different payload types, and you can't load the page until you're on the network, so they're inherently two scans. (First time on iOS you may need to "Forget" the network once so it re-probes.)
 
 The gallery is styled as a small OSINT terminal and shows a live storage gauge.
+
+> **No authentication.** The AP is open and the gallery has no login — by design, so a phone can join and browse with zero setup. The tradeoff: anyone in range while SHARE mode is up can view, download, or delete every saved capture, not just their own. SHARE mode is opt-in (long-press only) and the AP closes the moment you exit it, but don't leave it running unattended somewhere you wouldn't want a stranger rifling through your captures.
 
 ### over USB (exact bytes, guaranteed)
 

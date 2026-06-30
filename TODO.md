@@ -8,9 +8,8 @@
 - [ ] verify OV5640 XCLK stays stable through light sleep cycles
 - [ ] verify fmt2rgb888 byte order matches Pixel {r,g,b} struct on target hardware
 - [x] run test_data_roundtrip.py to confirm the data-layer format end-to-end (PASS)
-- [ ] on-hardware: decode a real saved BMP with decode_beacon.py and confirm SSIDs match the scan
-- [ ] install QRCode library (ricmoo) before building — SHARE mode needs it
-- [ ] on-hardware: verify SHARE mode — QR scans, phone joins AP, captive portal opens gallery, BMP downloads and decodes
+- [ ] on-hardware: decode a real saved PNG with decode_beacon.py and confirm SSIDs match the scan
+- [ ] on-hardware: verify SHARE mode end-to-end — QR scans, phone joins AP, captive portal opens gallery, PNG downloads and decodes (this is the only way images leave the device today, so it's the top item before calling this done)
 - [ ] tune LONG_PRESS_MS if 800ms feels too short/long on the real button
 
 ## in progress
@@ -35,8 +34,8 @@
 - [x] WiFi re-enable fix after capture failure
 - [x] Pixel packing static_assert
 - [x] three-state workflow: LIVE VIEW → PIPELINE → RESULT VIEW
-- [x] light sleep (10s idle, XCLK running, ~2ms wake)
-- [x] deep sleep (60s idle, ~300ms wake, always resumes in live view)
+- [x] battery-saving nap (45s idle → light sleep, screen+camera off; double-tap wakes; skipped while USB-tethered) — superseded the earlier light-sleep/deep-sleep split, see PROJECT_STATE.md
+- [x] rank WiFi scan results by RSSI before truncating to MAX_NETWORKS — scanNetworks() isn't signal-sorted, so a dense area (>12 visible APs) was previously able to drop genuinely-strong networks in favor of weaker ones the scan happened to enumerate first
 - [x] progress bar across pipeline stages
 - [x] freeze frame + "scanning wifi..." overlay during WiFi scan
 - [x] live view fps optimisation: GRAB_LATEST, fb_count=2, quality 63, 80MHz SPI
